@@ -45,5 +45,6 @@
 - **发布只走 Cloudflare Workers Builds**（OAuth 连仓库）：`main` 上执行 `npx wrangler@latest deploy`（不锁 wrangler 版本，所有者选择自动跟进最新）。`npm run deploy` 经 `deploy_guard.mjs` 只用来拦本机发起的发布；全仓 LF 由 `.gitattributes` 保证。Workers Builds 不等 GitHub CI，合并前要看 CI 是否通过。
 - **CI**：`push` 只看 `main`，PR 由 `pull_request` 覆盖；跑 Ruff、pytest、`npm run check`、`wrangler deploy --dry-run`。
 - **测试用替身，不联网**：替身 Mihomo 与采集器覆盖重试、并行与清理，加上 CLI 端到端和产物跨语言读回。真实订阅的实测走手动派发的 `verify-scan.yml`。（2026-09-21 曾决定不维护测试；2026-10-24 按所有者要求恢复。）
-- **Actions 固定 `ubuntu-24.04` 与 node24 版本的 action**。
+- **不锁依赖版本**（所有者选择自动跟进最新）：不提交 `package-lock.json` / `uv.lock`，`wrangler` 写 `latest`，生产部署用 `npx wrangler@latest deploy`；`scan.yml` 的 Python 环境按天缓存，Mihomo 每次取最新 release，在 Actions 里没有 GitHub 资产摘要就拒装。Action 用浮动大版本标签（`astral-sh/setup-uv` 从 v8 起不发浮动标签，只能写完整版本）。代价：上游出不兼容的版本时会直接失败，届时再临时指定版本。
+- **Actions runner 固定 `ubuntu-24.04`**。
 - **旧前端 `frontend/` 已删除**；要回退用 `git revert`。

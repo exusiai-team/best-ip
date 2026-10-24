@@ -39,14 +39,17 @@ def platform_asset() -> tuple[str, str, str]:
 
 
 def github_json(url: str) -> dict[str, Any]:
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "best-ip-installer",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "best-ip-installer",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    # Actions 里带上 GITHUB_TOKEN：匿名请求按 IP 限流，共享 runner 上取 latest 容易撞 403/429，
+    # 而 latest 没有直链可回退。
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=30) as response:
         return json.load(response)
 
@@ -148,12 +151,12 @@ def main() -> None:
     parser.add_argument(
         "--tag",
         default=os.getenv("BEST_IP_MIHOMO_TAG"),
-        help="固定 release tag；未提供时使用 latest（本地开发兼容）",
+        help="指定 release tag；未提供时使用 latest",
     )
     parser.add_argument(
         "--archive-sha256",
         default=os.getenv("BEST_IP_MIHOMO_ARCHIVE_SHA256"),
-        help="固定下载归档 SHA-256；生产 workflow 必须提供",
+        help="可选：额外核对的归档 SHA-256；未提供时用 GitHub release 给出的资产摘要",
     )
     parser.add_argument(
         "--archive-cache-dir",
@@ -187,6 +190,9 @@ def main() -> None:
         download(asset["browser_download_url"], archive)
         expected_digest = args.archive_sha256 or asset.get("digest")
         if not expected_digest:
+            if os.getenv("GITHUB_ACTIONS") == "true":
+                # 生产扫描会把订阅交给这个二进制，没有可信摘要就不装。
+                raise RuntimeError("GitHub release 没有给出资产摘要，拒绝安装未校验的 Mihomo")
             print("未提供可信 SHA-256；本次仅通过官方 HTTPS 下载，输出摘要不代表真实性校验。")
         digest = verify_digest(archive, expected_digest)
         if cache_path is not None:

@@ -41,7 +41,7 @@ npm run dev:no-reload
 
 可用 `--port 8080` 更换后端 API 端口、`--frontend-port 5174` 更换前端端口、`--no-open` 禁止自动打开浏览器。手动启动时必须同时设置 `BEST_IP_LOCAL_DEV=1` 与精确的 `BEST_IP_LOCAL_FRONTEND_ORIGIN=http://127.0.0.1:<前端端口>`；不要将任一服务绑定到局域网或公网地址，因为本地模式有意跳过生产 Worker 的密码登录与 scan token，只用于本机调试。
 
-固定正式版本（如 `v1.19.30`）安装遇到 GitHub API `403`/`429` 时，自动改用官方 Release 直链，不依赖第三方镜像。`latest` 与非标准 tag 不猜测下载地址。设置 `BEST_IP_MIHOMO_ARCHIVE_SHA256` 可强制校验归档；回退时若未指定摘要，则仅依赖官方 HTTPS，计算出的 SHA-256 不代表真实性校验。已有核心可通过 `BEST_IP_MIHOMO_PATH` 指定路径，跳过下载。
+Mihomo 默认安装最新 release，并用 GitHub 给出的资产摘要（`digest`）校验归档；在 GitHub Actions 里拿不到摘要就拒绝安装。设置 `GITHUB_TOKEN` 可避免匿名 API 限流。仍可用 `BEST_IP_MIHOMO_TAG` 指定版本（指定正式版本时，API 返回 `403`/`429` 会改用官方 Release 直链），或用 `BEST_IP_MIHOMO_ARCHIVE_SHA256` 额外核对摘要。已有核心可通过 `BEST_IP_MIHOMO_PATH` 指定路径，跳过下载。
 
 ## 生产行为
 
@@ -59,7 +59,7 @@ npm run dev:no-reload
 - 扫描进度画成三段步骤条（启动 → 扫描节点 → 校验结果；提交、排队、准备环境合成「启动」一格），配每秒走的用时。面板主体是**逐节点格子**：每个节点一格，实时显示等待 / 启动代理 / 连接检测站 / 查询 IP 质量 / 重试，用时每秒往上走，终态给完整 / 部分（缺哪几项）/ 失败（白名单原因）。读数来自 runner 约每秒一次的回报（`POST /api/scan-progress`，存在 Worker 的 `SCAN_PROGRESS` Durable Object 里），页面每秒读一次 `GET /api/scans/{id}/progress`（只读 Durable Object，不耗 GitHub API）。格子里没有出口 IP 与评分；读不到回报时进度条退回不定状态，不伪造数字。完成那一刻面板计数改用终态 artifact，格子只在三种终态个数与 artifact 逐一相同时保留——表格与导出仍以校验过的 artifact 为唯一事实源。
 - 刷新页面或换标签页后，若最近一次扫描还在排队/执行，页面会自动跟进它的进度（`/api/scans/latest` 的 `active`），跑完自动换上新结果；跟进只读，不能停止（停止需要发起时内存里的 scan token）。
 - 页面轮询首轮 1.5 秒、每次 ×1.5、上限 4 秒；节点检测完（runner 报了 packaging/done）后改为每秒一次，运行一结束就取结果。`scan.yml` 把单任务节点并发设为 16（托管 runner 默认公式只给 8）。
-- `scan.yml` 的准备段压到三步：校验输入 + 写 IPure 配置 + 解密订阅一步完成（私钥用完即删）；uv 管理的 Python 3.13、`.venv` 与 Mihomo 压缩包同一个缓存，命中时不装 uv、不跑 `uv sync`，直接 `.venv/bin/python`；`uv.lock` / `pyproject.toml` / Mihomo 版本变化时才走一次装 uv + `uv sync` 并存回缓存。
+- `scan.yml` 的准备段压到三步：校验输入 + 写 IPure 配置 + 解密订阅一步完成（私钥用完即删）；uv 管理的 Python 3.13 与 `.venv` 按天缓存，命中时不装 uv、不跑 `uv sync`，直接 `.venv/bin/python`；每天第一次扫描（或 `pyproject.toml` 变化时）重新解析最新依赖并存回缓存。Mihomo 每次取最新 release。
 
 ## 部署
 
@@ -82,7 +82,7 @@ Workers Builds 的构建设置（Settings → Build）：
 本地能做的检查（与 CI 相同）：
 
 ```powershell
-npm ci
+npm install
 npm run check         # 语法 + 前端契约 + MHTML 往返
 npm run dry-run       # wrangler deploy --dry-run，只看打包
 uv run ruff check .
@@ -91,7 +91,7 @@ uv run pytest -q      # 扫描核心、结果校验、CLI 端到端、产物读�
 
 部署不再需要任何 GitHub Actions secret（原来的 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID` 可以删除）。GitHub 上剩下的 secrets/variables 都是扫描用的，见「平台配置」第 4 条；`SITE_PASSWORD` 只有 `Verify scan flow` 工作流还在用，不用它可以删。
 
-Worker 没有第三方运行时 npm 依赖；密码会话和 GitHub App RS256 签名都使用原生 Web Crypto。`package.json` 与锁文件保留模块声明、语法检查命令和 Wrangler 部署工具。
+Worker 没有第三方运行时 npm 依赖；密码会话和 GitHub App RS256 签名都使用原生 Web Crypto。`package.json` 只保留模块声明、语法检查命令和 Wrangler 部署工具。
 
 Worker 使用 Static Assets 托管 `frontend-next/`；当前配置不使用 Cloudflare Pages 或 GitHub Pages。实时进度用一个 SQLite 后端的 Durable Object（`wrangler.jsonc` 的 `SCAN_PROGRESS` 绑定与 `v1` 迁移），首次发布时由迁移自动创建，Workers 免费计划可用，不需要在控制台事先建资源；绑定缺失时页面只是退回「只显示步骤」。
 
@@ -133,19 +133,19 @@ Worker 会精确核对 request ID、workflow path、事件、分支、run/attemp
 
 ## 验证
 
-仓库保留运行源码、部署配置与依赖锁文件；本地工具状态、凭据、Mihomo 二进制和扫描结果不进入 Git。`tests/` 用替身 Mihomo 与替身采集器覆盖扫描核心（重试并行与清理、DNS 引导出口）、结果校验与产物、CLI 端到端，以及「runner 产物能被浏览器 `readArtifact` 读回」的跨语言契约；不联网、不需要真实订阅。CI 跑 Ruff、pytest、`npm run check` 与 `wrangler deploy --dry-run`。生产 CLI 用法见 [docs/CLI.md](docs/CLI.md)，接口与结果格式见 [docs/CONTRACTS.md](docs/CONTRACTS.md)。
+仓库保留运行源码与部署配置（不提交依赖锁文件）；本地工具状态、凭据、Mihomo 二进制和扫描结果不进入 Git。`tests/` 用替身 Mihomo 与替身采集器覆盖扫描核心（重试并行与清理、DNS 引导出口）、结果校验与产物、CLI 端到端，以及「runner 产物能被浏览器 `readArtifact` 读回」的跨语言契约；不联网、不需要真实订阅。CI 跑 Ruff、pytest、`npm run check` 与 `wrangler deploy --dry-run`。生产 CLI 用法见 [docs/CLI.md](docs/CLI.md)，接口与结果格式见 [docs/CONTRACTS.md](docs/CONTRACTS.md)。
 
 ```powershell
 uv sync --dev
 uv run ruff check .
 uv run pytest -q
-npm ci
+npm install
 npm run check
 npm run dry-run
 git diff --check
 ```
 
-`scan.yml` 的生产运行只安装锁定的运行时依赖，并缓存已固定 SHA-256 的 Mihomo 压缩包；缓存命中后仍重新校验摘要再解压。
+仓库不锁依赖版本：没有 `package-lock.json` / `uv.lock`（两者都在 `.gitignore` 里），npm 与 Python 依赖每次按 `package.json` / `pyproject.toml` 解析最新，`wrangler` 写成 `latest`。`scan.yml` 的运行时依赖按天刷新，Mihomo 每次取最新 release 并按 GitHub 资产摘要校验。上游发布不兼容的新版本时扫描或 CI 可能直接失败，届时再临时指定版本。
 
 真实订阅不会写入仓库，运行前通过环境变量注入，并走生产同一套脚本。
 

@@ -29,3 +29,7 @@ temp/
 .mindfs/
 /CLAUDE.md
 .pi/
+
+# 不锁版本：依赖每次按 package.json / pyproject.toml 解析最新
+package-lock.json
+uv.lock

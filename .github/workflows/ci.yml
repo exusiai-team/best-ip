@@ -25,17 +25,17 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
-      - run: npm ci --prefer-offline --no-audit
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      # 不锁版本：没有 package-lock.json / uv.lock，每次按 package.json / pyproject.toml 装最新。
+      - run: npm install --no-audit --no-fund
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           enable-cache: true
           cache-python: true
           python-version: "3.13"
       - name: Lint and test (tests/test_artifact_reader.py 用到 node)
         run: |
-          uv run --frozen ruff check .
-          uv run --frozen pytest -q
+          uv run ruff check .
+          uv run pytest -q
       # npm run check = 语法（scripts/check_js.mjs）+ 前端契约（scripts/check_frontend_contracts.mjs）
       # + MHTML 序列化往返（frontend-next/tools/mhtml-roundtrip.mjs）。新断言接在 check 里，
       # 所以只要这条在跑，CI 就自动覆盖它们，不必在这里逐条罗列。

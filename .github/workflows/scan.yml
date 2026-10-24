@@ -31,12 +31,12 @@ jobs:
     timeout-minutes: 30
     # 精简过的准备段（约 2~3 秒）：
     # - 校验输入、写 IPure 配置、解密订阅合成一步，私钥用完立刻删，不再留到收尾；
-    # - Python 解释器（uv 管理的 3.13）+ .venv + Mihomo 压缩包放进同一个缓存：命中时一次还原，
-    #   不装 uv、不跑 uv sync，直接用 .venv/bin/python；只有 uv.lock / pyproject.toml / Mihomo 版本
-    #   变了才走一次「装 uv → uv sync」的慢路，并在 job 成功后存回缓存。
+    # - 不锁版本：Python 依赖按 pyproject.toml 解析最新，Mihomo 取最新 release。
+    # - Python 解释器（uv 管理的 3.13）+ .venv 按天缓存：每天第一次扫描走「装 uv → uv sync」重新解析
+    #   最新依赖（约 3 秒），同一天内后续扫描直接用 .venv/bin/python。
+    # - Mihomo 每次取 latest（带 GITHUB_TOKEN 避免 API 限流），用 GitHub 给的资产摘要校验。
     env:
       BEST_IP_PYTHON_DIR: /home/runner/.best-ip/python
-      BEST_IP_MIHOMO_ARCHIVE_DIR: /home/runner/.best-ip/mihomo-archive
     steps:
       - name: Checkout default branch
         uses: actions/checkout@v7
@@ -76,39 +76,42 @@ jobs:
             --request-id "$REQUEST_ID" \
             --key-id "$KEY_ID"
 
-      - name: Restore Python environment and Mihomo archive
+      - name: Pick today's environment cache key
+        id: day
+        run: echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Python environment
         id: env-cache
         uses: actions/cache@v6
         with:
           path: |
             .venv
-            /home/runner/.best-ip
-          key: best-ip-env-${{ runner.os }}-cpython3.13-${{ hashFiles('uv.lock', 'pyproject.toml') }}-mihomo-v1.19.30-cf06ce2c7d1421bdbda14ee4a5b6046672dc35ebf8eecd8e77504ec3c0ed9a84
+            /home/runner/.best-ip/python
+          key: best-ip-env-${{ runner.os }}-cpython3.13-${{ hashFiles('pyproject.toml') }}-${{ steps.day.outputs.day }}
 
       - name: Set up uv
         if: steps.env-cache.outputs.cache-hit != 'true'
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@v10.3.2
         with:
           enable-cache: false
 
       # 解释器必须装进缓存目录（只用 uv 管理的那份，不用 runner 镜像自带的）：.venv/bin/python 指向它，
       # 两样一起缓存才自洽，镜像升级也不会让缓存里的 .venv 指向一个不存在的解释器。
-      - name: Install Python and locked dependencies
+      - name: Install Python and latest dependencies
         if: steps.env-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           UV_PYTHON=3.13 UV_PYTHON_PREFERENCE=only-managed UV_PYTHON_INSTALL_DIR="$BEST_IP_PYTHON_DIR" \
-            uv sync --frozen --no-dev
+            uv sync --no-dev
           interpreter="$(readlink -f .venv/bin/python)"
           [[ "$interpreter" == "$BEST_IP_PYTHON_DIR"/* ]]
 
-      - name: Verify pinned Mihomo and IPure configuration
+      - name: Install latest Mihomo and verify IPure configuration
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          .venv/bin/python scripts/download_mihomo.py \
-            --tag v1.19.30 \
-            --archive-sha256 cf06ce2c7d1421bdbda14ee4a5b6046672dc35ebf8eecd8e77504ec3c0ed9a84 \
-            --archive-cache-dir "$BEST_IP_MIHOMO_ARCHIVE_DIR"
+          .venv/bin/python scripts/download_mihomo.py
           .venv/bin/python -c 'from backend.app.sources.ipure_config import load_ipure_headers; headers = load_ipure_headers(); assert headers.get("cookie"), "IPure verification cookie is required"'
 
       # 这一步也会把扫描进度（计数与每个节点的阶段，不含出口 IP 与评分）回报给 Worker 的
