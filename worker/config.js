@@ -17,7 +17,6 @@ export const MAX_JOB_PAGES = 10;
 export const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 export const KEY_ID_PATTERN = /^[a-f0-9]{64}$/iu;
 export const APP_ID_PATTERN = /^[0-9]+$/u;
-export const INSTALLATION_ID_PATTERN = /^[0-9]+$/u;
 
 export function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -29,13 +28,9 @@ export function positiveInteger(value) {
 }
 
 export function assertWorkerConfigured(env) {
-  if (
-    !KEY_ID_PATTERN.test(String(env.SCAN_KEY_ID || "").trim()) ||
-    !String(env.SCAN_TOKEN_SECRET || "").trim() ||
-    !APP_ID_PATTERN.test(String(env.GITHUB_APP_ID || "").trim()) ||
-    !INSTALLATION_ID_PATTERN.test(String(env.GITHUB_APP_INSTALLATION_ID || "").trim()) ||
-    !String(env.GITHUB_APP_PRIVATE_KEY || "").trim()
-  ) {
-    throw new HttpError(503, "Worker 扫描 secrets 尚未完整配置", "worker_not_configured");
+  // installation 由仓库查出来（worker/github.js），签名密钥从 App 私钥派生（worker/auth.js）。
+  if (!KEY_ID_PATTERN.test(String(env.SCAN_KEY_ID || "").trim()) ||
+      !APP_ID_PATTERN.test(String(env.GITHUB_APP_ID || "").trim()) || !String(env.GITHUB_APP_PRIVATE_KEY || "").trim()) {
+    throw new HttpError(503, "请配置 SCAN_KEY_ID、GITHUB_APP_ID 与 GITHUB_APP_PRIVATE_KEY", "worker_not_configured");
   }
 }
