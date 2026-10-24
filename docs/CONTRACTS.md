@@ -184,7 +184,7 @@ an integer 0..100, the sentinel `-1`, or null, and `score` must equal
 `ipure_scores.total`. `-1` means IPure marked that total/scenario as
 `restricted` (region-blocked): the value is off the 0..100 scale, is rendered as
 the number `-1` in neutral grey, and must not be read as "zero" or "lowest".
-Nothing else is accepted — `-2` and `101` are rejected by both validators.
+Nothing else is accepted — `-2` and `101` are rejected by the record validator.
 Level codes, verdicts and per-scenario level maps are not part of the record:
 they stay inside `requests.ipure.data` as raw upstream evidence, so the frontend
 has no level text to render. `data.total` and `data.scenarios[].score` keep the
@@ -217,7 +217,7 @@ AS name, `asn`), kind (`usage_type`, `is_residential`, `is_datacenter` = hosting
 (each `"ipure"`, `"coffee"` or null) says who supplied each group. `exit_ip` is still
 discovered by the Coffee trace (an IPure query needs an address) and is marked `"ipure"`
 when IPure's echoed `ip` equals it. The six new top-level fields are optional — artifacts
-written before them still validate — and both validators reject a non-string geo field, a
+written before them still validate — and the record validator rejects a non-string geo field, a
 `usage_type` outside the six documented values, or a `network_source` with other keys or
 values.
 Retry metadata, when present, must be internally consistent.
@@ -247,9 +247,13 @@ disagrees with its records — still ends the scan on the first attempt.
 
 Validation boundaries:
 
-1. Python and browser validators reject failed records with an exit IP and
-   successful records missing proxy evidence. Shared fixtures exercise both
-   implementations; browser validation also applies to local JSON imports.
+1. Record rules live in one place, `backend/app/results/validation.py`: failed
+   records with an exit IP and successful records missing proxy evidence are
+   rejected when a node is written, when the manifest is finalized and again by
+   `build_artifact` before publishing. The browser reader
+   (`frontend-next/app/artifact/reader.js`) checks integrity only — run identity,
+   `result_sha256`, counts and manifest/record agreement. `tests/test_artifact_reader.py`
+   feeds a runner-built artifact to that reader.
 2. `status.usable` means zero failed AND zero partial nodes in sanitizer/browser.
    Partial artifacts are structurally accepted but usable=false. An all-failed
    manifest is structurally complete yet unusable; workflow success is not node success.

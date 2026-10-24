@@ -1,10 +1,11 @@
 /* ============================================================================
-   产物读取器（外加 validation.js）
+   产物读取器：解 zip，核对 status.json 声明的身份与 result.json 的 SHA-256，再核对
+   manifest、计数与逐节点摘要彼此一致。
    ----------------------------------------------------------------------------
-   原是旧前端 frontend/src/artifact/ 的逐字副本；旧前端已删除，这里是唯一实现。
-   reader.js 是入口（它 import ./validation.js），校验规则与 IPure 取值域都在 validation.js。
+   节点记录的字段级规则（取值域、代理证据等）只在 runner 上校验一次
+   （backend/app/results/validation.py，发布前 build_artifact 必过）。这里不再抄一份：
+   原先两边各维护一套 schema，每加一个字段都要「两侧校验器同步」。
    ========================================================================== */
-import { validateRecord } from "./validation.js";
 const EOCD = 0x06054b50;
 const CENTRAL = 0x02014b50;
 const LOCAL = 0x04034b50;
@@ -237,7 +238,6 @@ export function validateExport(result, requestId = result?.id, status = { status
     ) {
       throw new Error("artifact 节点身份或状态校验失败");
     }
-    validateRecord(record, requestId, index);
     derived[record.status] += 1;
     if (record.completeness?.complete === true) derived.complete += 1;
     const entry = manifest.records[index];
