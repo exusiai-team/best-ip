@@ -76,19 +76,17 @@ Workers Builds 的构建设置（Settings → Build）：
 
 注意：Workers Builds 不等 GitHub 上的 `CI` 工作流结果，push 到 `main` 就会构建。所以合并前要看 PR 上的 CI 是绿的；也可以在 GitHub 的分支保护里把 `CI / test` 设成必过检查。
 
-为什么本地不许发布：本机检出可能是 CRLF（`core.autocrlf=true`，而仓库 blob 是 LF），也可能带着未提交的改动，`wrangler deploy` 会把这些字节原样发到线上，而它只报「上传成功」，不会说发上去的是不是仓库里的内容——历史上线上就这样跑过与任何 commit 都不一致的资产（`app/api.js` 线上 12327B vs blob 12089B，多出的 238 字节全是 CR）。所以守卫只在 Workers Builds 里放行（`WORKERS_CI=1`），并在发布前断言三件事：构建分支是 `main`（`WORKERS_CI_BRANCH`）、`HEAD` 等于本次构建声明的 commit（`WORKERS_CI_COMMIT_SHA`）、以及 assets 目录下每个文件都被 git 跟踪且工作区字节逐字节等于该 commit 的 blob。
+为什么本地不许发布：本机检出可能是 CRLF 或带着未提交的改动，`wrangler deploy` 会把这些字节原样发上线（历史上出过一次）。现在由 `.gitattributes`（全仓 LF）和 Workers Builds 的干净检出保证上线内容就是某个 commit，守卫只负责拦住本机发起的发布。
 
-本地能做的只有只读检查：
+本地能做的检查（与 CI 相同）：
 
 ```powershell
 npm ci
-npm run check         # 逐文件 node --check
+npm run check         # 语法 + 前端契约 + MHTML 往返
 npm run dry-run       # wrangler deploy --dry-run，只看打包
-npm run verify-notes  # 笔记门禁
-$env:SITE_PASSWORD="…"; npm run verify:deploy   # 核对线上内容与当前 commit 是否逐字节一致
+uv run ruff check .
+uv run pytest -q      # 扫描核心、结果校验、CLI 端到端、产物读回（替身 Mihomo，不联网）
 ```
-
-部署后自证改为手动：发布完成后在本地跑 `npm run verify:deploy`（见上），分两层：无凭据检查（登录页可达、CSP 仍放行签名 blob、静态资源仍被会话门挡住），以及有凭据的逐字节比对（用 `SITE_PASSWORD` 登录后，把 `frontend-next/` 下每个被 git 跟踪的文件与它在该 commit 里的 blob 比对）。新资产在边缘生效有个窗口（可能先返回 404，也可能先返回旧字节），这一步在宽限预算内会重取，不会把传播窗口判成漂移。
 
 部署不再需要任何 GitHub Actions secret（原来的 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID` 可以删除）。GitHub 上剩下的 secrets/variables 都是扫描用的，见「平台配置」第 4 条；`SITE_PASSWORD` 只有 `Verify scan flow` 工作流还在用，不用它可以删。
 
@@ -134,14 +132,14 @@ Worker 会精确核对 request ID、workflow path、事件、分支、run/attemp
 
 ## 验证
 
-仓库保留运行源码、部署配置与依赖锁文件；本地工具状态、凭据、Mihomo 二进制和扫描结果不进入 Git。测试套件已在提交 `928c770` 中删除、`/tests/` 同时加入 `.gitignore`，因此本仓库不再有 Python 或 JavaScript 用例：`npm test` 只做语法检查（`node --check`），CI 不再运行 `pytest`。门禁保留的是一条能真跑通的检查 —— Ruff、`npm test`（语法）、`npm run verify-notes` 和 `wrangler deploy --dry-run`。本地启动使用 `--no-dev`，不安装 pytest、Ruff 等测试工具。生产 CLI 用法见 [docs/CLI.md](docs/CLI.md)，接口与结果格式见 [docs/CONTRACTS.md](docs/CONTRACTS.md)。
+仓库保留运行源码、部署配置与依赖锁文件；本地工具状态、凭据、Mihomo 二进制和扫描结果不进入 Git。`tests/` 用替身 Mihomo 与替身采集器覆盖扫描核心（重试并行与清理、DNS 引导出口）、结果校验与产物、CLI 端到端，以及「runner 产物能被浏览器 `readArtifact` 读回」的跨语言契约；不联网、不需要真实订阅。CI 跑 Ruff、pytest、`npm run check` 与 `wrangler deploy --dry-run`。生产 CLI 用法见 [docs/CLI.md](docs/CLI.md)，接口与结果格式见 [docs/CONTRACTS.md](docs/CONTRACTS.md)。
 
 ```powershell
 uv sync --dev
 uv run ruff check .
+uv run pytest -q
 npm ci
-npm test
-npm run verify-notes
+npm run check
 npm run dry-run
 git diff --check
 ```

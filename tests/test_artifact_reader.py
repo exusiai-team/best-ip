@@ -68,7 +68,8 @@ def test_browser_reader_rejects_wrong_run_and_tampered_bytes(tmp_path, make_succ
     path = _artifact_zip(tmp_path, [make_success(0)])
     assert _read(path, run_id=8)["ok"] is False
 
-    tampered = _artifact_zip(
-        tmp_path / "t", [make_success(0)], tamper=lambda raw: raw.replace(b"203.0.113.1", b"203.0.113.9")
-    )
+    def swap_ip(raw):
+        return raw.replace(b"203.0.113.1", b"203.0.113.9")
+
+    tampered = _artifact_zip(tmp_path / "t", [make_success(0)], tamper=swap_ip)
     assert _read(tampered)["ok"] is False

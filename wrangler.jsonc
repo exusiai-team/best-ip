@@ -4,7 +4,6 @@
   "main": "worker/index.js",
   "compatibility_date": "2026-08-23",
   "workers_dev": true,
-  // 线上页面 = frontend-next（scripts/verify_deploy.mjs 与 deploy_guard.mjs 都从这一行读比对基准）。
   "assets": {
     "directory": "./frontend-next",
     "binding": "ASSETS",
