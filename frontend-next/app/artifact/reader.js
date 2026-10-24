@@ -1,13 +1,8 @@
 /* ============================================================================
-   产物读取器 —— frontend/src/artifact/reader.js 的逐字副本（外加 validation.js）
+   产物读取器（外加 validation.js）
    ----------------------------------------------------------------------------
-   为什么是副本而不是共享模块：两个前端都是「不打包、直接由 assets 目录提供」的静态站点，
-   assets.directory 只能指向一个目录（现在是 ./frontend-next），跨出该目录的相对 import
-   在生产里就是 404。所以只能复制；这也是这段代码唯一合理的重复理由。
-
-   两边必须同时改：改动 frontend/src/artifact/ 里任何一个文件时，把同名文件一起同步过来。
-   reader.js 是入口（它 import ./validation.js），校验规则与 IPure 取值域都在那一边。
-   等旧前端下线（assets 切换完成、frontend/ 删除）这里的副本才重新变成唯一实现。
+   原是旧前端 frontend/src/artifact/ 的逐字副本；旧前端已删除，这里是唯一实现。
+   reader.js 是入口（它 import ./validation.js），校验规则与 IPure 取值域都在 validation.js。
    ========================================================================== */
 import { validateRecord } from "./validation.js";
 const EOCD = 0x06054b50;

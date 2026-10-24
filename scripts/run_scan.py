@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -286,6 +287,7 @@ async def _run_scan(
         first_report = asyncio.create_task(reporter.report("subscription"))
     try:
         async with asyncio.timeout(args.timeout):
+            download_started = perf_counter()
             try:
                 content = await download(
                     url,
@@ -310,6 +312,7 @@ async def _run_scan(
                 raise ScanCLIError("input_invalid") from exc
             # value 只由 download_subscription 写成 direct/relay；替身不回写时如实报 unknown。
             egress = source.value if source.value in {"direct", "relay"} else "unknown"
+            download_ms = round((perf_counter() - download_started) * 1000)
             print(f"subscription_source: {egress}", file=sys.stderr)
             if source.fallback_reason is not None:
                 print(
@@ -358,6 +361,7 @@ async def _run_scan(
             follow_task = None
             final_counts = job_counts(manager.jobs.get(job_id))
             final_nodes = live_nodes(read_nodes(), forbidden)
+            print(_timing_summary(download_ms, job, final_nodes), file=sys.stderr)
             if reporter is not None and job.get("status") == "completed":
                 await reporter.report("packaging", final_counts, final_nodes)
             if job.get("cleanup_confirmed") is not True:
@@ -405,6 +409,42 @@ async def _run_scan(
     _publish(output, result, status)
     if reporter is not None:
         await reporter.report("done", final_counts, final_nodes)
+
+
+def _seconds(ms: float) -> str:
+    return f"{ms / 1000:.1f}s"
+
+
+def _timing_summary(download_ms: int, job: Any, nodes: list[dict[str, Any]] | None) -> str:
+    """一行聚合耗时，给 Actions 日志找瓶颈用：只有数字，没有节点名、出口 IP 或订阅内容。
+
+    节点用时取逐节点实时快照的 ms（含被丢弃的失败尝试），phase_sum 是各节点各相之和
+    （并行下会远大于墙钟，看的是比例）。
+    """
+
+    metrics = job.get("metrics") if isinstance(job, dict) else None
+    metrics = metrics if isinstance(metrics, dict) else {}
+    parts = [f"subscription={_seconds(download_ms)}"]
+    if isinstance(metrics.get("wall_ms"), int):
+        parts.append(f"scan_wall={_seconds(metrics['wall_ms'])}")
+    if nodes:
+        elapsed = sorted(int(node.get("ms") or 0) for node in nodes)
+        p50 = elapsed[len(elapsed) // 2]
+        p90 = elapsed[min(len(elapsed) - 1, len(elapsed) * 9 // 10)]
+        parts += [
+            f"nodes={len(nodes)}",
+            f"peak_parallel={int(metrics.get('peak_active_nodes') or 0)}",
+            f"node_p50={_seconds(p50)}",
+            f"node_p90={_seconds(p90)}",
+            f"node_max={_seconds(elapsed[-1])}",
+            f"retried={sum(1 for node in nodes if int(node.get('a') or 0) > 1)}",
+            f"failed={sum(1 for node in nodes if node.get('s') == 'failed')}",
+        ]
+    phase_ms = metrics.get("phase_ms")
+    if isinstance(phase_ms, dict):
+        sums = " ".join(f"{name}={_seconds(int(value))}" for name, value in phase_ms.items())
+        parts.append(f"phase_sum[{sums}]")
+    return "scan_timing: " + " ".join(parts)
 
 
 def main(argv: list[str] | None = None) -> int:

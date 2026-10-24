@@ -1,27 +1,36 @@
 name: CI
 
+# push 只看 main：PR 分支的每次 push 已经由 pull_request 跑一遍，原来 push + pull_request
+# 两个触发会让同一个 commit 跑两次 CI。同一分支连推时取消旧的那次。
 on:
   push:
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
         with:
           enable-cache: true
           cache-python: true
           python-version: "3.13"
-      - name: Install Python
-        run: uv python install 3.13
-      - name: Sync dependencies
-        run: uv sync --frozen --dev
+      # 只装 dev 组（ruff）：lint 不需要 fastapi/httpx 等运行时依赖，ruff 版本仍由 uv.lock 锁定。
       - name: Lint
-        run: uv run ruff check .
-      - name: Install Node dependencies
-        uses: actions/setup-node@v5
+        run: uv run --frozen --only-group dev ruff check .
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm

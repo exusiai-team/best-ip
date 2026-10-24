@@ -4,8 +4,7 @@
   "main": "worker/index.js",
   "compatibility_date": "2026-08-23",
   "workers_dev": true,
-  // 线上页面 = 新前端：assets 根指向 frontend-next。旧 frontend/ 仍留在仓库里但不再被提供；
-  // 回退只需把下面这一行改回 "./frontend"（scripts/verify_deploy.mjs 会跟着这一行换比对基准）。
+  // 线上页面 = frontend-next（scripts/verify_deploy.mjs 与 deploy_guard.mjs 都从这一行读比对基准）。
   "assets": {
     "directory": "./frontend-next",
     "binding": "ASSETS",

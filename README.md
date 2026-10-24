@@ -46,7 +46,7 @@ npm run dev:no-reload
 ## 生产行为
 
 - 输入必须是顶部含 `proxies` 的 UTF-8 Mihomo/Clash YAML 公开 HTTP/HTTPS 地址。
-- 浏览器使用 AES-256-GCM 加密订阅 URL，再用 `frontend/scan-public.pem` 对应的 RSA-OAEP-3072 公钥包裹 AES key；明文 URL 不进入 Worker API、GitHub workflow input 或 artifact。
+- 浏览器使用 AES-256-GCM 加密订阅 URL，再用 `frontend-next/scan-public.pem` 对应的 RSA-OAEP-3072 公钥包裹 AES key；明文 URL 不进入 Worker API、GitHub workflow input 或 artifact。
 - Worker 固定调度 `silverwolfxai/best-ip` 的 `main` 分支和 `scan.yml`，不提供通用 GitHub API 代理。
 - 每个节点尝试使用独立 Mihomo 进程、端口、连接池和临时目录；默认最多 `min(16, max(8, CPU 核数))` 个节点并发（上限为订阅节点数），每节点最多 3 次尝试：首次失败后余下的尝试**并行**跑，第一份非失败记录胜出、其余立即取消并确认清理（永久连不上的节点从约 18 秒降到约 11 秒）。
 - 出口 IP、国家和地区、服务商 / ISP、ASN、接入（住宅 / 移动 / 商业 / 机房 / 教育 / 政府）与原生性以 IPure `/api/lookup` 报告为准（`geo.countryName/country/region/city`、`asn.asn/org/name`、`usageType`、`nativeType`）：报告里说了的那一组就用它，没说的那一组才回落到 Coffee 的归属查询；每组来源记在节点记录的 `network_source`，页面在对应单元格的 title 里标出「来源：IPure / Coffee」。出口 IP 仍由 trace 发现（IPure 查询必须带上一个 IP），IPure 回显一致时记为由 IPure 确认。
@@ -104,7 +104,7 @@ Worker 使用 Static Assets 托管 `frontend-next/`；当前配置不使用 Clou
 2. 在 Worker 的 Settings → Variables and Secrets 添加 Secret `SITE_PASSWORD`：使用密码管理器生成至少 16 个字符的随机密码（最多 1024 字符）。无需 Cloudflare Access；如果之前启用了 Worker 域名的 Access 保护，请关闭该保护，并移除覆盖该域名的 Zero Trust Access Application。原来的三个 `ACCESS_*` 变量可以删除。
 3. 配置 Worker secrets/variables：
 
-   - `SCAN_KEY_ID`：`frontend/scan-public.pem` 的 SPKI DER SHA-256 指纹。
+   - `SCAN_KEY_ID`：`frontend-next/scan-public.pem` 的 SPKI DER SHA-256 指纹。
    - `GITHUB_APP_ID`
    - `GITHUB_APP_INSTALLATION_ID`
    - `GITHUB_APP_PRIVATE_KEY`
