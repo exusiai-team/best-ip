@@ -15,5 +15,8 @@
   "durable_objects": {
     "bindings": [{ "name": "SCAN_PROGRESS", "class_name": "ScanProgress" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ScanProgress"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ScanProgress"] }],
+  // Workers Builds 给非生产分支跑 `wrangler preview`，新版 wrangler 要求有这个块。
+  // 预览不继承顶层的绑定与密钥：预览站点只证明「能构建、能上传」，打开会提示 Worker 未配置。
+  "previews": {}
 }
