@@ -635,7 +635,7 @@ async function runExport(format, button) {
 
 /* ------------------------------------------------------------ 扫描入口 --- */
 // 页面上的扫描只有三样东西：一个订阅地址输入、一个开始按钮、一块进度面板。整条链路的实现都在
-// app/scan.js（加密、派发、轮询、取产物），这里只管「什么时候调它」和「把话说给谁看」。
+// app/scan.js（提交、派发、轮询、取产物），这里只管「什么时候调它」和「把话说给谁看」。
 const scanElements = {
   form: document.getElementById("scanForm"),
   url: document.getElementById("subscriptionUrl"),
@@ -766,7 +766,7 @@ const scan = {
   generation: 0,
   timer: null,
   delay: SCAN_POLL_FIRST_MS,
-  // starting 是同步闸：加密 + POST 那一整段里 session 还是 null（它要等 202 才有），
+  // starting 是同步闸：POST 那一整段里 session 还是 null（它要等 202 才有），
   // 只靠 session 挡不住连点两次提交。
   starting: false,
   cancelling: false,
@@ -829,18 +829,10 @@ function failScan(message, { keepSession = false, keepTable = false } = {}) {
   toast(`扫描失败：${message}`);
 }
 
-/**
- * 启动时决定这一块显不显示：只有「本站有网关」才谈得上发起扫描。
- * 公钥指纹（SCAN_KEY_ID）缺失时把按钮关掉并说明原因——摆一个点了必然被 400/503 拒掉的
- * 按钮，比明说「这里发不了扫描」更糟。
- */
+/** 启动时决定这一块显不显示：只有「本站有网关」才谈得上发起扫描。缺配置时由 Worker 明确回 503。 */
 function revealScanBar() {
   if (!scanElements.form) return;
   scanElements.form.hidden = false;
-  const keyId = String(globalThis.BEST_IP_CONFIG?.keyId || "");
-  if (/^[a-f0-9]{64}$/u.test(keyId)) return;
-  if (scanElements.start) scanElements.start.disabled = true;
-  restartPanel({ stage: "submit", state: "error", message: "本站没有配置扫描公钥（SCAN_KEY_ID），这个页面暂时发不了扫描。" });
 }
 
 async function beginScan() {
@@ -872,7 +864,7 @@ async function beginScan() {
   restartPanel({ stage: "submit", state: "active", message: `${STAGE_TEXT.submit}…`, startedAt: Date.now() });
   let session;
   try {
-    session = await startScan(url, globalThis.BEST_IP_CONFIG, {});
+    session = await startScan(url);
   } catch (error) {
     if (generation !== scan.generation) return;
     // 派发就没被接受：表里还是上一轮的结果，留着它，只把原因说出来。
@@ -1006,7 +998,7 @@ function sendStopRequest(generation) {
 }
 
 function onStopClick() {
-  // 加密 + POST 那段窗口里「停止」已经显示，但会话要等 202 才有（scan.session 还是 null）。
+  // POST 那段窗口里「停止」已经显示，但会话要等 202 才有（scan.session 还是 null）。
   // 原来这里直接 return，于是最长 START_TIMEOUT_MS（30 秒）里按钮按下去毫无反馈。
   // 记下 pendingCancel，会话一到手就立刻把停止请求发出去（见 beginScan 的收尾）。
   if (!scan.session) {
@@ -1234,7 +1226,7 @@ function wireControls() {
 
   // 表单默认提交会让浏览器导航（这里没有 action，会重载当前地址，凭证与进度全丢），
   // 所以必须拦下来；扫描进行中重复提交也只认第一次。判据是 session 或 starting——
-  // 加密 + POST 那一段里 session 还是 null，光看它会漏掉「连点两下」。
+  // POST 那一段里 session 还是 null，光看它会漏掉「连点两下」。
   if (scanElements.form) {
     scanElements.form.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -1265,7 +1257,7 @@ function boot() {
   // 先判 jobId 就会把它当成演示路径，给出一条满屏合成 IP、零提示的深链。
   // 在线模式排在最前面：它的「没有数据」和「读失败」都只有一条路（本站 Worker），
   // 拿本机那套 ?api= 文案去解释它只会把人指向一个在生产里根本不存在的地址。
-  // 扫描入口只属于在线部署：那里才有本站的 Worker 网关与扫描公钥。它与下面三条分支无关——
+  // 扫描入口只属于在线部署：那里才有本站的 Worker 网关。它与下面三条分支无关——
   // 那三条决定这张表显示什么，这一块决定「能不能在本页发起一次扫描」。
   if (target.mode === "gateway") revealScanBar();
 

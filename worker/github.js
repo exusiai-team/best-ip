@@ -1,8 +1,9 @@
 import { base64UrlEncode, text } from "./auth.js";
 import { HttpError, GitHubError } from "./responses.js";
-import { GITHUB_API, GITHUB_OWNER, GITHUB_REPOSITORY, APP_ID_PATTERN, INSTALLATION_ID_PATTERN, isRecord } from "./config.js";
+import { GITHUB_API, GITHUB_OWNER, GITHUB_REPOSITORY, APP_ID_PATTERN, isRecord, positiveInteger } from "./config.js";
 
 let installationTokenCache = null;
+let installationIdCache = null;
 
 export async function appJwt(env) {
   const appId = String(env.GITHUB_APP_ID || "").trim();
@@ -89,27 +90,48 @@ export function normalizePrivateKey(pem) {
   return `-----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY-----\n`;
 }
 
-export async function installationToken(env, forceRefresh = false) {
-  const installationId = String(env.GITHUB_APP_INSTALLATION_ID || "").trim();
-  if (!INSTALLATION_ID_PATTERN.test(installationId)) {
-    throw new HttpError(503, "GitHub App installation 尚未配置", "worker_not_configured");
+function appHeaders(jwt) {
+  return {
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    Authorization: `Bearer ${jwt}`,
+    "User-Agent": "best-ip-cloudflare-worker",
+  };
+}
+
+// installation ID 不用配置：拿 App JWT 问「这个仓库装的是哪一个 installation」。
+// 仓库换了所有者、App 重新安装之后自动跟上，不必再改 Worker 设置。
+async function installationId(jwt) {
+  if (installationIdCache) return installationIdCache;
+  const response = await fetch(`${GITHUB_API}/repos/${GITHUB_OWNER}/${GITHUB_REPOSITORY}/installation`, {
+    headers: appHeaders(jwt),
+  });
+  if (response.status === 404) {
+    throw new HttpError(503, `GitHub App 没有安装到 ${GITHUB_OWNER}/${GITHUB_REPOSITORY}`, "github_app_not_installed");
   }
+  const payload = response.ok ? await response.json().catch(() => null) : null;
+  const id = positiveInteger(payload?.id);
+  if (!id) throw new HttpError(502, `无法查询 GitHub App installation（HTTP ${response.status}）`, "github_auth_failed");
+  installationIdCache = id;
+  return id;
+}
+
+export async function installationToken(env, forceRefresh = false) {
   const now = Date.now();
   if (!forceRefresh && installationTokenCache && installationTokenCache.expiresAt - now > 5 * 60 * 1000) {
     return installationTokenCache.token;
   }
-  const response = await fetch(`${GITHUB_API}/app/installations/${installationId}/access_tokens`, {
+  const jwt = await appJwt(env);
+  const response = await fetch(`${GITHUB_API}/app/installations/${await installationId(jwt)}/access_tokens`, {
     method: "POST",
-    headers: {
-      Accept: "application/vnd.github+json",
-      "Content-Type": "application/json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      Authorization: `Bearer ${await appJwt(env)}`,
-      "User-Agent": "best-ip-cloudflare-worker",
-    },
+    headers: { ...appHeaders(jwt), "Content-Type": "application/json" },
     body: JSON.stringify({ repositories: [GITHUB_REPOSITORY] }),
   });
-  if (!response.ok) throw new HttpError(502, "无法取得 GitHub App installation token", "github_auth_failed");
+  if (!response.ok) {
+    // App 可能被卸载重装过：下次重新查 installation。
+    installationIdCache = null;
+    throw new HttpError(502, `无法取得 GitHub App installation token（HTTP ${response.status}）`, "github_auth_failed");
+  }
   const payload = await response.json().catch(() => null);
   if (!isRecord(payload) || typeof payload.token !== "string") {
     throw new HttpError(502, "GitHub App token 返回格式无效", "github_auth_failed");
@@ -152,7 +174,7 @@ export async function githubJson(env, path, options = {}, retry = true) {
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
     const status = response.status === 403 ? 502 : response.status === 404 ? 404 : 502;
-    throw new GitHubError(status, status === 404 ? "GitHub 资源不存在" : "GitHub API 请求失败");
+    throw new GitHubError(status, status === 404 ? "GitHub 资源不存在" : `GitHub API 请求失败（HTTP ${response.status}）`);
   }
   return payload;
 }

@@ -1,5 +1,6 @@
 import { HttpError, json } from "./responses.js";
 import { isRecord } from "./config.js";
+import { assertRunnerToken } from "./runner.js";
 
 export const SUBSCRIPTION_RELAY_PATH = "/api/subscription-relay";
 
@@ -9,7 +10,6 @@ const MAX_REQUEST_BYTES = MAX_REQUEST_CHARS * 4;
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 const MAX_LOCATION_CHARS = 4096;
 const TIMEOUT_MS = 20_000;
-const MINIMUM_TOKEN_CHARS = 16;
 const MINIMUM_URL_CHARS = 8;
 const MAXIMUM_URL_CHARS = 4096;
 const UNSAFE_URL_CHARACTERS = /[\s\u0000-\u001f\u007f-\u009f]/u;
@@ -92,21 +92,6 @@ export function constantTimeEqual(left, right) {
     difference |= (a[index] ?? 0) ^ (b[index] ?? 0);
   }
   return difference === 0;
-}
-
-export function assertRelayConfigured(env) {
-  const configured = typeof env?.SUBSCRIPTION_RELAY_TOKEN === "string" ? env.SUBSCRIPTION_RELAY_TOKEN : "";
-  if (configured.length < MINIMUM_TOKEN_CHARS) {
-    throw new HttpError(503, "订阅中继 token 尚未配置", "worker_not_configured");
-  }
-  return configured;
-}
-
-export function assertRelayToken(request, configured) {
-  const provided = request.headers.get("X-Best-IP-Relay-Token");
-  if (typeof provided !== "string" || !provided || !constantTimeEqual(provided, configured)) {
-    throw new HttpError(401, "订阅中继 token 无效", "unauthorized");
-  }
 }
 
 async function readTarget(request) {
@@ -202,7 +187,7 @@ export async function subscriptionRelay(request, env) {
 
 async function relay(request, env) {
   if (request.method !== "POST") throw new HttpError(405, "请求方法不支持", "method_not_allowed");
-  assertRelayToken(request, assertRelayConfigured(env));
+  await assertRunnerToken(request, env);
   const target = assertTargetUrl(await readTarget(request));
   const upstream = await fetchUpstream(target.href);
   if (upstream.status >= 300 && upstream.status <= 399) {

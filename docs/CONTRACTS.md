@@ -16,8 +16,8 @@ materialize the same records. The documentation IP is deliberately non-productio
   GET/POST/DELETE, headers Accept/Content-Type, and no credentials.
   Windows launcher disables reload; health checks file existence, not process creation.
 - Production: Worker Static Assets + password session -> GitHub App -> fixed
-  `silverwolfxai/best-ip`, `main`, `.github/workflows/scan.yml`.
-  The workflow decrypts with `scripts/decrypt_subscription.mjs`, then runs
+  `exusiai-team/best-ip`, `main`, `.github/workflows/scan.yml`.
+  The workflow claims the subscription with `scripts/claim_subscription.mjs`, then runs
   `scripts/run_scan.py` directly against the shared scan core. No HTTP server or
   acceptance script runs in production. See [CLI.md](CLI.md) for arguments and exits.
 - `npm run dry-run` checks bundling read-only. Releases only come from Cloudflare
@@ -60,8 +60,9 @@ shared secret instead of the browser session.
 Login accepts a URL-encoded password form (8192-byte cap), returning a 303 to
 `/` and a 12-hour signed `__Host-best-ip-session` cookie with Secure,
 HttpOnly, SameSite=Strict and Path=/. Wrong passwords return 401. Passwords
-must contain 16–1024 characters. Changing SITE_PASSWORD or SCAN_TOKEN_SECRET
-invalidates existing sessions. POST logout clears the current browser cookie.
+must contain 16–1024 characters. Changing SITE_PASSWORD or rotating GITHUB_APP_PRIVATE_KEY
+invalidates existing sessions (both HMAC keys are derived from the App private key
+with distinct purpose labels). POST logout clears the current browser cookie.
 Login and logout POSTs require same-origin metadata. Unauthenticated HTML
 navigation redirects to `/login`; API requests return 401. Authentication
 responses and protected assets use Cache-Control: no-store.
@@ -71,14 +72,14 @@ GET/DELETE/artifact requests require `X-Best-IP-Scan-Token`, an in-memory,
 two-hour token bound to request ID and dispatch time. Mutations are same-origin.
 
 - GET `/api/health`: `{status:"ok",mode:"github-actions-gateway",authentication:"password"}`.
-- POST `/api/scans`: `{request_id,key_id,envelope}`; returns 202
-  `{request_id,run_id:null,dispatched_at,scan_token}`.
-- Envelope v1: `v,kid,alg,request_id,issued_at,expires_at,ek,iv,aad,ct`;
-  algorithm `RSA-OAEP-3072-SHA256+AES-256-GCM`. AES-256-GCM encrypts the URL,
-  RSA-OAEP wraps the key; public-key SPKI SHA-256 must match key ID.
-- Dispatch body: `{ref:"main",inputs:{request_id,key_id,
-  encrypted_subscription_url:JSON.stringify(envelope)}}`.
-  Workflow input names/types remain three required strings.
+- POST `/api/scans`: `{request_id,subscription_url}`; returns 202
+  `{request_id,run_id:null,dispatched_at,scan_token}`. The URL must pass the relay's
+  public-target check (400 `invalid_subscription_url`). It is stored only in the
+  request's `SCAN_PROGRESS` Durable Object for 15 minutes (409 `request_id_conflict`
+  when the request ID was used before; 503 `worker_not_configured` without the binding)
+  and is deleted if the dispatch fails.
+- Dispatch body: `{ref:"main",inputs:{request_id,worker_url}}` where `worker_url` is
+  the Worker's own origin. The subscription URL never enters workflow inputs.
 - GET `/api/scans/{request_id}?run_id={id}&run_attempt={attempt}`: request ID,
   normalized status, run, jobs, jobs availability/count/warning, artifact readiness
   and (once resolved) artifact ID/name. Unresolved run is `dispatching`, run null,
@@ -120,12 +121,22 @@ two-hour token bound to request ID and dispatch time. Mutations are same-origin.
 - Errors: `{error:stable_code,detail:safe_message}`, no-store; unexpected errors
   become generic `internal_error` 500.
 
+- POST `/api/scan-claim`: server-to-server, outside the password session. Header
+  `Authorization: Bearer <GitHub Actions OIDC JWT>`, verified against GitHub's JWKS:
+  `iss` `https://token.actions.githubusercontent.com`, `aud` equal to the Worker origin,
+  unexpired, `repository` `exusiai-team/best-ip`, `workflow_ref`
+  `…/.github/workflows/scan.yml@refs/heads/main`, `ref` `refs/heads/main`, `event_name`
+  `workflow_dispatch`, positive `run_id`/`run_attempt`; otherwise 401 `unauthorized`.
+  Body `{request_id}`. Returns 200 `{subscription_url,runner_token}` exactly once per
+  request ID and deletes the stored URL; a second claim or an expired one is 410
+  `subscription_gone`. The run identity from the token is bound to the request.
+
 - POST `/api/subscription-relay`: server-to-server subscription fetch, outside the
   password session and without same-origin checks, because the caller is an Actions
   runner with no cookie or Origin. It requires header
-  `X-Best-IP-Relay-Token`, compared in constant time against the Worker secret
-  `SUBSCRIPTION_RELAY_TOKEN`; a missing or short secret is 503 `worker_not_configured`
-  and a wrong token is 401 `unauthorized`. Body `{url}` is validated structurally only
+  `X-Best-IP-Relay-Token` carrying the runner token issued by `/api/scan-claim`
+  (`<request_id>.<random>`; its SHA-256 is compared in constant time with the one
+  stored for that request); anything else is 401 `unauthorized`. Body `{url}` is validated structurally only
   (length 8..4096, http/https, hostname present, no userinfo, no whitespace or control
   characters, port 1..65535, and no localhost/`.localhost`/`.internal`/`.local` or
   private, loopback, link-local and reserved IP literals). The Worker therefore does
@@ -145,8 +156,9 @@ two-hour token bound to request ID and dispatch time. Mutations are same-origin.
   URL, never logs it, and forwards no inbound headers or cookies.
 
 - POST `/api/scan-progress`: server-to-server progress report from the scan runner,
-  outside the password session like the relay and authenticated by the same
-  `X-Best-IP-Relay-Token` / `SUBSCRIPTION_RELAY_TOKEN` pair. Body (≤ 256 KiB)
+  outside the password session like the relay and authenticated by the same runner
+  token; the report's `request_id`, `run_id` and `run_attempt` must equal the identity
+  bound at claim time (403 `run_identity_mismatch`). Body (≤ 256 KiB)
   `{request_id,run_id,run_attempt,phase,total,completed,success,partial,failed,nodes?}`;
   every count is an integer 0..100000, `completed ≤ total` and
   `success+partial+failed = completed`. `nodes`, when present, has exactly `total`
@@ -267,8 +279,8 @@ Validation boundaries:
 | Limits | `BEST_IP_SUBSCRIPTION_MAX_BYTES` 5242880; `BEST_IP_MAX_NODES` 500; `BEST_IP_MAX_PARALLEL_JOBS` 2; `BEST_IP_MAX_PARALLEL_NODES` min(16, max(8, CPU count)); `BEST_IP_MAX_NODE_ATTEMPTS` 3; `BEST_IP_NODE_RETRY_BACKOFF_MS` 500; `BEST_IP_PAGE_TIMEOUT_MS` 45000; `BEST_IP_SUBSCRIPTION_TIMEOUT_SECONDS` 30 |
 | Download | `BEST_IP_MIHOMO_TAG`, `BEST_IP_MIHOMO_ARCHIVE_SHA256` optional; default is the latest release verified against the GitHub asset digest (required under Actions); `GITHUB_TOKEN` authenticates the API call |
 | Local verifier | `BEST_IP_TEST_SUBSCRIPTION_URL`; `BEST_IP_API_BASE` http://127.0.0.1:8000; `BEST_IP_REAL_SCAN_TIMEOUT_SECONDS` 1800; `BEST_IP_REQUEST_ID`; `BEST_IP_ALLOW_PARTIAL` opt-in |
-| Worker | `SCAN_KEY_ID`, `SCAN_TOKEN_SECRET`, `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY`, `SITE_PASSWORD`, `SUBSCRIPTION_RELAY_TOKEN`; `ASSETS` binding |
-| Actions | secrets `SCAN_PRIVATE_KEY_PEM`, `IPURE_CONFIG_YAML`, `SCAN_RELAY_TOKEN`; variables `SCAN_KEY_ID`, `SCAN_RELAY_URL`; temporary (step-scoped) `BEST_IP_ENVELOPE`, `REQUEST_ID`, `KEY_ID`, `EXPECTED_KEY_ID`, `RELAY_URL`, `RELAY_TOKEN`, `IPURE_CONFIG_YAML`, `SCAN_PRIVATE_KEY_PEM` (written to `$RUNNER_TEMP/scan-private.pem` and deleted as soon as the envelope is decrypted), `BEST_IP_SUBSCRIPTION_RELAY_URL`, `BEST_IP_SUBSCRIPTION_RELAY_TOKEN`; job-level `BEST_IP_PYTHON_DIR`, `BEST_IP_MIHOMO_ARCHIVE_DIR` (the cached interpreter and Mihomo archive); run identity from `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` |
+| Worker | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `SITE_PASSWORD`; `ASSETS` and `SCAN_PROGRESS` bindings |
+| Actions | secret `IPURE_CONFIG_YAML`; inputs `request_id`, `worker_url`; OIDC via `permissions: id-token: write` (`ACTIONS_ID_TOKEN_REQUEST_URL`/`_TOKEN`); temporary (step-scoped) `REQUEST_ID`, `WORKER_URL`, `BEST_IP_SUBSCRIPTION_RELAY_URL`, `BEST_IP_SUBSCRIPTION_RELAY_TOKEN` (read from `$RUNNER_TEMP/runner-token`, masked); job-level `BEST_IP_PYTHON_DIR`; run identity from `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` |
 | Deployment (Workers Builds) | none configured; guard reads the injected `WORKERS_CI`, `WORKERS_CI_BRANCH` |
 
 ## Frontend transport boundary
@@ -277,7 +289,7 @@ Use exactly `health()`, `start(subscriptionUrl)`, `poll(session)`, `cancel(sessi
 The opaque session owns token/run/attempt/dispatch time. UI never persists those.
 ScanSnapshot separately represents execution, phase/safe error, progress source,
 unknown totals as null, result availability and terminal node counts.
-Keep local JSON and gateway encrypted envelope/ZIP distinct below this interface.
+Keep local JSON and gateway ZIP distinct below this interface.
 Separate unavailable, verified-with-usable-nodes, all-failed and invalid results;
 do not interpret old artifact `usable=false` as absence of a partial exit IP.
 An intentional change to usable or validator rules needs explicit fixture

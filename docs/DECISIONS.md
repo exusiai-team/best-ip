@@ -31,7 +31,8 @@
 - **抓订阅：直连优先，Worker 中继只在 `http_status_403` / `direct_timeout` / `direct_unreachable` 时回退**。同一台订阅主机可能只拒 Azure，也可能只拒 Cloudflare，写死任何一侧都会把另一侧打成 403。逐跳公网校验只在 runner 做。
 - **实时进度：runner 约 0.75 秒报一次 → Worker 的 Durable Object → 页面每秒读一次**。只有计数、阶段和节点名，没有出口 IP 与评分。结果只认终态 artifact。
 - **扫描状态轮询只在「运行中但读不到 runner 进度」时才取 Actions job 明细**（页面拿步骤名兜底推断阶段）。
-- **页面内发起扫描**：浏览器用 `scan-public.pem` 做 RSA-OAEP-3072 加 AES-256-GCM 信封，明文订阅不离开浏览器，也不进 workflow 输入。
+- **页面内发起扫描，订阅地址不进 GitHub**：页面把地址交给 Worker，暂存在 Durable Object（15 分钟，领取即删），workflow 输入只有 `request_id` 与 `worker_url`。原先的 RSA-OAEP + AES-GCM 信封要在两边各配一份密钥与指纹，而 Worker 的订阅中继本来就看得到明文，加密只挡住了 GitHub 一侧；现在 GitHub 一侧根本拿不到它。
+- **runner 身份用 GitHub Actions OIDC，不用共享密钥**：Worker 用 GitHub 的 JWKS 验签并核对仓库、`main`、`scan.yml`、`workflow_dispatch` 与 audience；领取时发一张只对这次运行有效的随机 runner 令牌给中继与进度回报用。installation ID 自动查询，HMAC 密钥从 App 私钥派生。整个系统只剩 4 项配置（`SITE_PASSWORD`、`GITHUB_APP_ID`、`GITHUB_APP_PRIVATE_KEY`、Actions 的 `IPURE_CONFIG_YAML`）。
 
 ## 前端
 
@@ -44,7 +45,7 @@
 
 - **发布只走 Cloudflare Workers Builds**（OAuth 连仓库）：`main` 上执行 `npx wrangler@latest deploy`（不锁 wrangler 版本，所有者选择自动跟进最新）。`npm run deploy` 经 `deploy_guard.mjs` 只用来拦本机发起的发布；全仓 LF 由 `.gitattributes` 保证。Workers Builds 不等 GitHub CI，合并前要看 CI 是否通过。
 - **CI**：`push` 只看 `main`，PR 由 `pull_request` 覆盖；跑 Ruff、pytest、`npm run check`、`wrangler deploy --dry-run`。
-- **测试用替身，不联网**：替身 Mihomo 与采集器覆盖重试、并行与清理，加上 CLI 端到端和产物跨语言读回。真实订阅的实测走手动派发的 `verify-scan.yml`。（2026-09-21 曾决定不维护测试；2026-10-24 按所有者要求恢复。）
+- **测试用替身，不联网**：替身 Mihomo 与采集器覆盖重试、并行与清理，加上 CLI 端到端和产物跨语言读回。真实订阅的实测直接在线上页面发起一次扫描（原 `verify-scan.yml` 依赖信封加密，已删除）。（2026-09-21 曾决定不维护测试；2026-10-24 按所有者要求恢复。）
 - **不锁依赖版本**（所有者选择自动跟进最新）：不提交 `package-lock.json` / `uv.lock`，`wrangler` 写 `latest`，生产部署用 `npx wrangler@latest deploy`；`scan.yml` 的 Python 环境按天缓存，Mihomo 每次取最新 release，在 Actions 里没有 GitHub 资产摘要就拒装。Action 用浮动大版本标签（`astral-sh/setup-uv` 从 v8 起不发浮动标签，只能写完整版本）。代价：上游出不兼容的版本时会直接失败，届时再临时指定版本。
 - **非生产分支跑 `wrangler preview`**，`wrangler.jsonc` 里放空的 `previews` 块（新版 wrangler 要求）。预览不继承绑定与密钥，只用来证明能构建、能上传。
 - **Actions runner 固定 `ubuntu-24.04`**。

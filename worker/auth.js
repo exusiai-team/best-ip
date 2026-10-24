@@ -45,6 +45,18 @@ export async function hmacKey(secret) {
   return hmacKeyCache.get(normalized);
 }
 
+// 签名密钥不单独配置：从 GitHub App 私钥（Worker 本来就必须有的高熵 secret）按用途派生，
+// 用途标签把扫描 token 与登录会话分开。轮换 App 私钥会让已签出的 token 与会话一起失效。
+function appSecret(env) {
+  const secret = String(env.GITHUB_APP_PRIVATE_KEY || "").trim();
+  if (!secret) throw new HttpError(503, "请配置 GITHUB_APP_PRIVATE_KEY", "worker_not_configured");
+  return secret;
+}
+
+function scanTokenKey(env) {
+  return hmacKey(JSON.stringify(["best-ip-scan-token-v2", appSecret(env)]));
+}
+
 export async function signScanToken(env, requestId, dispatchedAt) {
   const now = Math.floor(Date.now() / 1000);
   const payload = {
@@ -54,7 +66,7 @@ export async function signScanToken(env, requestId, dispatchedAt) {
     expires_at: now + SCAN_TOKEN_TTL_SECONDS,
   };
   const encoded = base64UrlEncode(text(JSON.stringify(payload)));
-  const signature = await crypto.subtle.sign("HMAC", await hmacKey(env.SCAN_TOKEN_SECRET), text(encoded));
+  const signature = await crypto.subtle.sign("HMAC", await scanTokenKey(env), text(encoded));
   return `${encoded}.${base64UrlEncode(new Uint8Array(signature))}`;
 }
 
@@ -67,7 +79,7 @@ export async function verifyScanToken(env, token, requestId) {
   const [encoded, encodedSignature] = parts;
   const valid = await crypto.subtle.verify(
     "HMAC",
-    await hmacKey(env.SCAN_TOKEN_SECRET),
+    await scanTokenKey(env),
     base64UrlDecode(encodedSignature),
     text(encoded),
   );
@@ -99,15 +111,15 @@ export const SESSION_TTL_SECONDS = 12 * 60 * 60;
 
 export function assertLoginConfigured(env) {
   if (typeof env.SITE_PASSWORD !== "string" || env.SITE_PASSWORD.length < 16 || env.SITE_PASSWORD.length > 1024 ||
-      !String(env.SCAN_TOKEN_SECRET || "").trim()) {
-    throw new HttpError(503, "请配置至少 16 个字符的 SITE_PASSWORD 和 SCAN_TOKEN_SECRET", "worker_not_configured");
+      !String(env.GITHUB_APP_PRIVATE_KEY || "").trim()) {
+    throw new HttpError(503, "请配置至少 16 个字符的 SITE_PASSWORD 和 GITHUB_APP_PRIVATE_KEY", "worker_not_configured");
   }
 }
 
 async function sessionKey(env) {
   assertLoginConfigured(env);
-  // Separate login signatures from scan tokens; rotating either secret revokes sessions.
-  return hmacKey(JSON.stringify(["best-ip-session-v1", env.SCAN_TOKEN_SECRET, env.SITE_PASSWORD]));
+  // 与扫描 token 分开派生；改访问密码或轮换 App 私钥都会让已有会话失效。
+  return hmacKey(JSON.stringify(["best-ip-session-v2", appSecret(env), env.SITE_PASSWORD]));
 }
 
 export async function passwordMatches(env, password) {

@@ -46,8 +46,8 @@ Mihomo 默认安装最新 release，并用 GitHub 给出的资产摘要（`diges
 ## 生产行为
 
 - 输入必须是顶部含 `proxies` 的 UTF-8 Mihomo/Clash YAML 公开 HTTP/HTTPS 地址。
-- 浏览器使用 AES-256-GCM 加密订阅 URL，再用 `frontend-next/scan-public.pem` 对应的 RSA-OAEP-3072 公钥包裹 AES key；明文 URL 不进入 Worker API、GitHub workflow input 或 artifact。
-- Worker 固定调度 `silverwolfxai/best-ip` 的 `main` 分支和 `scan.yml`，不提供通用 GitHub API 代理。
+- 页面把订阅地址交给本站 Worker（同源 HTTPS），Worker 只把它暂存在 `SCAN_PROGRESS` Durable Object（15 分钟过期），workflow 输入里只有 `request_id` 与 Worker 地址；runner 凭 GitHub Actions OIDC 证明自己是 `main` 上 `scan.yml` 的这一次运行后领取一次，领完即删。订阅地址不进入 GitHub 的 workflow 输入、日志或 artifact。
+- Worker 固定调度 `exusiai-team/best-ip` 的 `main` 分支和 `scan.yml`，不提供通用 GitHub API 代理。
 - 每个节点尝试使用独立 Mihomo 进程、端口、连接池和临时目录；默认最多 `min(16, max(8, CPU 核数))` 个节点并发（上限为订阅节点数），每节点最多 3 次尝试：首次失败后余下的尝试**并行**跑，第一份非失败记录胜出、其余立即取消并确认清理（永久连不上的节点从约 18 秒降到约 11 秒）。
 - 出口 IP、国家和地区、服务商 / ISP、ASN、接入（住宅 / 移动 / 商业 / 机房 / 教育 / 政府）与原生性以 IPure `/api/lookup` 报告为准（`geo.countryName/country/region/city`、`asn.asn/org/name`、`usageType`、`nativeType`）：报告里说了的那一组就用它，没说的那一组才回落到 Coffee 的归属查询；每组来源记在节点记录的 `network_source`，页面在对应单元格的 title 里标出「来源：IPure / Coffee」。出口 IP 仍由 trace 发现（IPure 查询必须带上一个 IP），IPure 回显一致时记为由 IPure 确认。
 - Coffee 页面与 trace 并行；确认出口 IP 后，lookup、global ping、portscan、pingcheck、related、IPure 官方 `/api/lookup` 评分及 ChatGPT/Codex 探测按既定依赖并发执行。IPure 没有返回纯净度总分时，节点会如实标记为“部分”。
@@ -59,7 +59,7 @@ Mihomo 默认安装最新 release，并用 GitHub 给出的资产摘要（`diges
 - 扫描进度画成三段步骤条（启动 → 扫描节点 → 校验结果；提交、排队、准备环境合成「启动」一格），配每秒走的用时。面板主体是**逐节点格子**：每个节点一格，实时显示等待 / 启动代理 / 连接检测站 / 查询 IP 质量 / 重试，用时每秒往上走，终态给完整 / 部分（缺哪几项）/ 失败（白名单原因）。读数来自 runner 约每秒一次的回报（`POST /api/scan-progress`，存在 Worker 的 `SCAN_PROGRESS` Durable Object 里），页面每秒读一次 `GET /api/scans/{id}/progress`（只读 Durable Object，不耗 GitHub API）。格子里没有出口 IP 与评分；读不到回报时进度条退回不定状态，不伪造数字。完成那一刻面板计数改用终态 artifact，格子只在三种终态个数与 artifact 逐一相同时保留——表格与导出仍以校验过的 artifact 为唯一事实源。
 - 刷新页面或换标签页后，若最近一次扫描还在排队/执行，页面会自动跟进它的进度（`/api/scans/latest` 的 `active`），跑完自动换上新结果；跟进只读，不能停止（停止需要发起时内存里的 scan token）。
 - 页面轮询首轮 1.5 秒、每次 ×1.5、上限 4 秒；节点检测完（runner 报了 packaging/done）后改为每秒一次，运行一结束就取结果。`scan.yml` 把单任务节点并发设为 16（托管 runner 默认公式只给 8）。
-- `scan.yml` 的准备段压到三步：校验输入 + 写 IPure 配置 + 解密订阅一步完成（私钥用完即删）；uv 管理的 Python 3.13 与 `.venv` 按天缓存，命中时不装 uv、不跑 `uv sync`，直接 `.venv/bin/python`；每天第一次扫描（或 `pyproject.toml` 变化时）重新解析最新依赖并存回缓存。Mihomo 每次取最新 release。
+- `scan.yml` 的准备段压到三步：校验输入 + 写 IPure 配置 + 凭 OIDC 领取订阅一步完成；uv 管理的 Python 3.13 与 `.venv` 按天缓存，命中时不装 uv、不跑 `uv sync`，直接 `.venv/bin/python`；每天第一次扫描（或 `pyproject.toml` 变化时）重新解析最新依赖并存回缓存。Mihomo 每次取最新 release。
 
 ## 部署
 
@@ -89,31 +89,37 @@ uv run ruff check .
 uv run pytest -q      # 扫描核心、结果校验、CLI 端到端、产物读回（替身 Mihomo，不联网）
 ```
 
-部署不再需要任何 GitHub Actions secret（原来的 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID` 可以删除）。GitHub 上剩下的 secrets/variables 都是扫描用的，见「平台配置」第 4 条；`SITE_PASSWORD` 只有 `Verify scan flow` 工作流还在用，不用它可以删。
+部署不再需要任何 GitHub Actions secret（原来的 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID` 可以删除）。GitHub 上只剩扫描用的 `IPURE_CONFIG_YAML` 一个 secret，见「平台配置」。
 
 Worker 没有第三方运行时 npm 依赖；密码会话和 GitHub App RS256 签名都使用原生 Web Crypto。`package.json` 只保留模块声明、语法检查命令和 Wrangler 部署工具。
 
 Worker 使用 Static Assets 托管 `frontend-next/`；当前配置不使用 Cloudflare Pages 或 GitHub Pages。实时进度用一个 SQLite 后端的 Durable Object（`wrangler.jsonc` 的 `SCAN_PROGRESS` 绑定与 `v1` 迁移），首次发布时由迁移自动创建，Workers 免费计划可用，不需要在控制台事先建资源；绑定缺失时页面只是退回「只显示步骤」。
 
-端到端实测走 `Verify scan flow`（`.github/workflows/verify-scan.yml`，人工派发）：先在本机用 `frontend-next/app/scan-crypto.js` 把订阅地址封成信封（明文不进 Actions 输入），再把 `request_id`、`key_id`、`encrypted_subscription_url` 三项交给该工作流。它用 `SITE_PASSWORD` 登录线上站点、经 Worker 发起真实扫描，直接复用前端的 `scan.js` / `gateway.js` / artifact reader 跟进度与逐字节校验，日志只打印聚合计数与耗时。
-
 ## 平台配置
 
-1. 创建 GitHub App，只授予当前仓库 `Actions: Read and write` 与 `Metadata: Read`，并只安装到 `silverwolfxai/best-ip`（仓库所有者变了就要在新所有者下重新安装，并更新 `GITHUB_APP_INSTALLATION_ID`）。
-2. 在 Worker 的 Settings → Variables and Secrets 添加 Secret `SITE_PASSWORD`：使用密码管理器生成至少 16 个字符的随机密码（最多 1024 字符）。无需 Cloudflare Access；如果之前启用了 Worker 域名的 Access 保护，请关闭该保护，并移除覆盖该域名的 Zero Trust Access Application。原来的三个 `ACCESS_*` 变量可以删除。
-3. 配置 Worker secrets/variables：
+一共只有 4 项，全都是「换不掉的外部凭据」：
 
-   - `SCAN_KEY_ID`：`frontend-next/scan-public.pem` 的 SPKI DER SHA-256 指纹。
-   - `GITHUB_APP_ID`
-   - `GITHUB_APP_INSTALLATION_ID`
-   - `GITHUB_APP_PRIVATE_KEY`
-   - `SCAN_TOKEN_SECRET`
-   - `SITE_PASSWORD`
-   - `SUBSCRIPTION_RELAY_TOKEN`：runner 回调 Worker（订阅中继与 `/api/scan-progress`）的令牌，至少 16 个字符，必须与 Actions secret `SCAN_RELAY_TOKEN` 相同。
+| 位置 | 名称 | 说明 |
+| --- | --- | --- |
+| Worker Secret | `SITE_PASSWORD` | 访问密码，至少 16 个字符（最多 1024），用密码管理器生成 |
+| Worker Secret | `GITHUB_APP_PRIVATE_KEY` | GitHub App 私钥（PEM，PKCS#1 / PKCS#8 都行） |
+| Worker Variable | `GITHUB_APP_ID` | GitHub App 的数字 ID，不是秘密 |
+| Actions Secret | `IPURE_CONFIG_YAML` | 与本地 `config/ipure.yml` 相同的请求头覆盖内容，必须带 IPure 验证 cookie |
 
-4. 配置 Actions secrets `SCAN_PRIVATE_KEY_PEM`、`SCAN_RELAY_TOKEN`、`IPURE_CONFIG_YAML`，并配置 Actions variables `SCAN_KEY_ID`、`SCAN_RELAY_URL`（Worker 的 https 地址）。`IPURE_CONFIG_YAML` 保存与本地 `config/ipure.yml` 相同的请求头覆盖内容，`scan.yml` 要求它非空且带 IPure 验证 cookie，缺失时扫描在准备阶段失败；Actions 扫描前生成该文件，结束时清理，不上传到结果 artifact。Worker 仅调度扫描，不查询 IPure，也不向前端提供任何第三方请求头。可用 `gh secret set IPURE_CONFIG_YAML --repo silverwolfxai/best-ip < config/ipure.yml` 同步本地配置到云端；修改本地文件不会自动更新 GitHub Secret。
+1. 创建 GitHub App，只授予 `Actions: Read and write` 与 `Metadata: Read`，并只安装到 `exusiai-team/best-ip`。installation ID 由 Worker 调 `GET /repos/{owner}/{repo}/installation` 自动查出；仓库换了所有者只需在新所有者下重新安装 App，并改 `worker/config.js` 的 `GITHUB_OWNER`。
+2. 在 Worker 的 Settings → Variables and Secrets 配好上表三项。
+3. 在仓库 Settings → Secrets and variables → Actions 配 `IPURE_CONFIG_YAML`。`scan.yml` 要求它非空且带 IPure 验证 cookie，缺失时扫描在准备阶段失败；Actions 扫描前生成该文件，结束时清理，不上传到结果 artifact。可用 `gh secret set IPURE_CONFIG_YAML --repo exusiai-team/best-ip < config/ipure.yml` 同步；修改本地文件不会自动更新 GitHub Secret。
 
-打开网站后输入访问密码。登录会话有效期 12 小时，保存在 Secure、HttpOnly、SameSite=Strict 的主机专属 Cookie 中；页面提供退出登录入口。修改 `SITE_PASSWORD` 或 `SCAN_TOKEN_SECRET` 后旧会话失效。退出登录清除当前浏览器 Cookie，其他浏览器的会话不受影响。密码和签名密钥只放 Worker 运行时 Secrets，不放 Build variables 或仓库。
+不需要配置的东西，以及为什么：
+
+- **runner ↔ Worker 的共享令牌**：runner 用 GitHub Actions OIDC（`permissions: id-token: write`）向 `POST /api/scan-claim` 证明身份，Worker 用 GitHub 公开的 JWKS 验签，并核对仓库、`main`、`scan.yml`、`workflow_dispatch` 与 audience（Worker 自己的 origin）。领取时 Worker 再发一张只对这次运行有效的随机 runner 令牌（只存 SHA-256），订阅中继与进度回报都凭它。
+- **加密公私钥**：订阅地址不再经过 GitHub，自然不用加密信封。
+- **Worker 地址**：派发 workflow 时由 Worker 作为 `worker_url` 输入传入。
+- **签名密钥**：登录会话与 scan token 的 HMAC 密钥都从 `GITHUB_APP_PRIVATE_KEY` 按用途派生。
+
+以前的 `SCAN_KEY_ID`、`SCAN_TOKEN_SECRET`、`GITHUB_APP_INSTALLATION_ID`、`SUBSCRIPTION_RELAY_TOKEN`（Worker），以及 `SCAN_PRIVATE_KEY_PEM`、`SCAN_RELAY_TOKEN`、`SITE_PASSWORD`、变量 `SCAN_KEY_ID`、`SCAN_RELAY_URL`（Actions）都可以删除。
+
+打开网站后输入访问密码。登录会话有效期 12 小时，保存在 Secure、HttpOnly、SameSite=Strict 的主机专属 Cookie 中；页面提供退出登录入口。修改 `SITE_PASSWORD` 或轮换 `GITHUB_APP_PRIVATE_KEY` 后旧会话失效。退出登录清除当前浏览器 Cookie，其他浏览器的会话不受影响。密码和 App 私钥只放 Worker 运行时 Secrets，不放 Build variables 或仓库。
 
 登录接口为 `POST /login`，没有内置分布式尝试次数限制；如需限制在线猜测，可在 Cloudflare 为该路径配置限流规则。缺少登录配置时 Worker 返回 503；扫描配置在调用扫描功能时检查。scan token 有效期两小时，只存在页面内存并通过 `X-Best-IP-Scan-Token` 请求头发送，不进入 URL 或 localStorage。
 

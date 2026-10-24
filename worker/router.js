@@ -1,5 +1,5 @@
 import { HttpError, json, secureResponse } from "./responses.js";
-import { KEY_ID_PATTERN, assertWorkerConfigured } from "./config.js";
+import { assertWorkerConfigured } from "./config.js";
 import { authenticate, assertSameOrigin } from "./auth.js";
 import { createScan, scanState, cancelScan, resolveScanRun } from "./scans.js";
 import { downloadArtifact } from "./artifacts.js";
@@ -7,6 +7,7 @@ import { latestScanState } from "./latest.js";
 import { loginRoute, loginRedirect } from "./login.js";
 import { SUBSCRIPTION_RELAY_PATH, subscriptionRelay } from "./relay.js";
 import { SCAN_PROGRESS_PATH, scanProgressFeed, scanProgressReport } from "./progress.js";
+import { SCAN_CLAIM_PATH, claimSubscription } from "./runner.js";
 
 export async function api(request, env, auth) {
   const url = new URL(request.url);
@@ -43,7 +44,11 @@ export async function fetchHandler(request, env, ctx) {
   if (url.pathname === SUBSCRIPTION_RELAY_PATH) {
     return secureResponse(await subscriptionRelay(request, env), { noStore: true });
   }
-  // 同上：runner 回报扫描进度（计数与逐节点阶段，不含出口 IP 与评分），凭同一把 runner 凭证。
+  // 同上：runner 凭 GitHub Actions OIDC 领取这次扫描的订阅地址与 runner 令牌。
+  if (url.pathname === SCAN_CLAIM_PATH) {
+    return secureResponse(await claimSubscription(request, env), { noStore: true });
+  }
+  // 同上：runner 回报扫描进度（计数与逐节点阶段，不含出口 IP 与评分），凭同一张 runner 令牌。
   if (url.pathname === SCAN_PROGRESS_PATH) {
     return secureResponse(await scanProgressReport(request, env), { noStore: true });
   }
@@ -64,19 +69,12 @@ export async function fetchHandler(request, env, ctx) {
     return secureResponse(await api(request, env, auth), { noStore: true });
   }
   if (url.pathname === "/site-config.js") {
-    // 这个文件是「这次部署怎么跑」的标记，不是「扫描能力齐不齐」的检查：缺 SCAN_KEY_ID 时也要照发。
+    // 这个文件是「这次部署怎么跑」的标记，不是「扫描能力齐不齐」的检查：扫描 secrets 缺失时也要照发。
     // 否则页面读不到配置就退回示例数据，线上会安静地显示一屏合成 IP——一个配置疏漏装成了设计示例。
     // 能力检查交给 /api/* 的 assertWorkerConfigured：那里缺配置就该明确 503。
-    // keyId / publicKeyPath 只有那个会发起扫描的旧前端用得到；字段留着，是为了把 assets 根
-    // 改回 ./frontend 时那条回退路径仍然可用。
-    const keyId = String(env.SCAN_KEY_ID || "").trim().toLowerCase();
     return secureResponse(
       new Response(
-        `window.BEST_IP_CONFIG = Object.freeze(${JSON.stringify({
-          mode: "gateway",
-          publicKeyPath: "./scan-public.pem",
-          keyId: KEY_ID_PATTERN.test(keyId) ? keyId : null,
-        })});`,
+        `window.BEST_IP_CONFIG = Object.freeze(${JSON.stringify({ mode: "gateway" })});`,
         { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store" } },
       ),
       { noStore: true },

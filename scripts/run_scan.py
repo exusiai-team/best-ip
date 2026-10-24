@@ -163,7 +163,8 @@ def _publish(output: Path, result: bytes, status: bytes) -> None:
 def _progress_reporter(
     args: argparse.Namespace, relay_url: str, relay_token: str, factory: Any
 ) -> Any:
-    """进度回报与订阅中继同属一个 Worker、同一把 runner 凭证；没配中继（本地）就不回报。"""
+    """进度回报与订阅中继同属一个 Worker、同一张领取订阅时拿到的 runner 令牌；
+    没配中继（本地）就不回报。"""
 
     if not relay_url:
         return None
