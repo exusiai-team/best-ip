@@ -1,27 +1,25 @@
 // ============================================================================
-// 发布路径门闩：只有远程（GitHub Actions 的 main）能发布，本地一律拒绝。
+// 发布路径门闩：只有 Cloudflare Workers Builds（Git 集成，构建 main）能发布，本地一律拒绝。
 // ----------------------------------------------------------------------------
 // 为什么需要这个门闩：2026-09-24 那次「本地 npm run deploy」把工作区里 CRLF 的资产
 // （本机 core.autocrlf=true，而仓库 blob 是 LF）当成线上内容发了上去，线上因此短暂跑着
 // 与任何 commit 都不一致的文件（app/api.js 12327B vs blob 12089B，差的 238 字节就是 CR 个数）。
 // `wrangler deploy` 只报「上传成功」，它不会说发上去的是不是仓库里的字节；「发布内容等于某个
-// commit」这条契约只有把发布固定在流水线上才守得住（CI 检出是 LF，且发布的就是 CI 验过的那一个 commit）。
+// commit」这条契约只有把发布固定在远程构建上才守得住（构建机是 Linux 干净检出，blob 是 LF）。
 //
 // 这个脚本做四件事：
-//   1. 非 GitHub Actions 环境直接拒绝（exit 2），并打印两条真正的发布路径；
-//   2. 分支不是 main 时拒绝（exit 3）——`workflow_dispatch` 可以指定 ref，不钉住分支的话
-//      `gh workflow run worker.yml --ref <别处>` 能把任意分支发上线，而发布后自证比对的还是
-//      那个分支的 HEAD，会一路绿灯；
-//   3. HEAD 不等于本次运行声明的 commit（GITHUB_SHA）时拒绝（exit 4）——「发布的就是 CI 验过的
-//      那一个 commit」是这条链的性质，不是巧合；
+//   1. 不在 Workers Builds 里（WORKERS_CI !== "1"）直接拒绝（exit 2），并打印真正的发布路径；
+//   2. 构建分支（WORKERS_CI_BRANCH）不是 main 时拒绝（exit 3）——非生产分支应走
+//      Workers Builds 的非生产分支命令（只出预览版本），不能把别处的代码发上线；
+//   3. HEAD 不等于本次构建声明的 commit（WORKERS_CI_COMMIT_SHA）时拒绝（exit 4）；
 //   4. 发布之前断言「工作区字节 == 这个 commit 的 blob」：assets 目录下每个文件都必须被 git 跟踪，
 //      且逐字节等于 `git show HEAD:<path>`。这把「发布内容与 commit 不一致」从发布后的事后检查提前
 //      到发布前。早先的实现只按扩展名挑文本资产、只查有没有 CR 字节，那只是这条性质的代理：会漏掉
 //      清单外的扩展名（.webmanifest/.map/.xml…），也会把「blob 本身就含 CR」误判成漂移。直接比 blob
-//      才是契约本身。发布后仍由 scripts/verify_deploy.mjs 对线上做逐字节比对。
+//      才是契约本身。发布后可用 scripts/verify_deploy.mjs 对线上做逐字节比对。
 //
-// 用法（只有 worker.yml 会用到）：node scripts/deploy_guard.mjs
-// 退出码：0 可以发布；1 内容与 blob 不一致；2 不是 Actions 环境；3 分支不是 main；4 HEAD ≠ GITHUB_SHA。
+// 用法：Workers Builds 的部署命令填 `npm run deploy`（不是默认的 `npx wrangler deploy`，那样会绕过本脚本）。
+// 退出码：0 可以发布；1 内容与 blob 不一致；2 不是 Workers Builds；3 分支不是 main；4 HEAD ≠ WORKERS_CI_COMMIT_SHA。
 // ============================================================================
 
 import { execFileSync } from "node:child_process";
@@ -96,15 +94,13 @@ function differenceHint(working, blob) {
   return `工作区 ${working.length}B、blob ${blob.length}B`;
 }
 
-if (process.env.GITHUB_ACTIONS !== "true") {
+if (process.env.WORKERS_CI !== "1") {
   console.error(
     [
-      "拒绝本地发布：发布只能走远程仓库，本地 npm run deploy 已被禁止。",
+      "拒绝本地发布：发布只能走 Cloudflare Workers Builds，本地 npm run deploy 已被禁止。",
       "",
-      "两条真正的发布路径：",
-      "  1. push 到 main → CI（lint + 语法 + wrangler dry-run）成功后，Deploy Cloudflare Worker",
-      "     工作流自动发布，发布的就是 CI 验过的那一个 commit；",
-      "  2. 需要重发一次时：gh workflow run worker.yml --ref main（或 GitHub 页面上手动派发）。",
+      "真正的发布路径：push（或合并 PR）到 main → Workers Builds 检出该 commit 并执行 npm run deploy；",
+      "需要重发一次时，在 Cloudflare 控制台该 Worker 的 Deployments / Builds 里对 main 重新构建。",
       "",
       "为什么：本地部署会把工作区（可能是 CRLF 检出、可能带着未提交改动）的字节直接发到线上，",
       "而 wrangler deploy 只报「上传成功」，不会说发上去的是不是仓库里的内容。本地能做的只读检查：",
@@ -114,14 +110,13 @@ if (process.env.GITHUB_ACTIONS !== "true") {
   process.exit(2);
 }
 
-const branch = process.env.GITHUB_REF_NAME || "";
+const branch = process.env.WORKERS_CI_BRANCH || "";
 if (branch && branch !== "main") {
   console.error(
     [
       `拒绝发布：本次运行在分支 ${branch} 上，而发布只发生在 main。`,
-      "发布的就是 main 上 CI 验过的那个 commit；用 --ref 派发到别的分支会把那份代码发上线，",
-      "而发布后自证比对的还是那个分支的 HEAD，只会一路绿灯。",
-      "要发布：push 到 main（或 gh workflow run worker.yml --ref main）。",
+      "非生产分支应走 Workers Builds 的非生产分支命令（默认 npx wrangler preview，只出预览版本），",
+      "不要把它也设成 npm run deploy。要发布：push 或合并到 main。",
     ].join("\n"),
   );
   process.exit(3);
@@ -129,12 +124,12 @@ if (branch && branch !== "main") {
 
 const commit = "HEAD";
 const head = commitOfHead();
-const declared = process.env.GITHUB_SHA || "";
+const declared = process.env.WORKERS_CI_COMMIT_SHA || "";
 if (declared && head !== "unknown" && head !== declared) {
   console.error(
     [
-      `拒绝发布：检出的 HEAD 是 ${head}，而本次运行声明的 commit 是 ${declared}。`,
-      "发布必须是「CI 验过的那一个 commit」，checkout 的 ref 与工作流的声明对不上时不能发布。",
+      `拒绝发布：检出的 HEAD 是 ${head}，而本次构建声明的 commit 是 ${declared}。`,
+      "发布的必须是这次构建声明的那一个 commit，检出与声明对不上时不能发布。",
     ].join("\n"),
   );
   process.exit(4);

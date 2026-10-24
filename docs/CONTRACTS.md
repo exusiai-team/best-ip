@@ -20,9 +20,10 @@ materialize the same records. The documentation IP is deliberately non-productio
   The workflow decrypts with `scripts/decrypt_subscription.mjs`, then runs
   `scripts/run_scan.py` directly against the shared scan core. No HTTP server or
   acceptance script runs in production. See [CLI.md](CLI.md) for arguments and exits.
-- `npm run dry-run` checks bundling read-only. `npm run deploy` is the pipeline's
-  publish step and refuses to run outside GitHub Actions (`scripts/deploy_guard.mjs`
-  exits 2 locally); releases only come from `.github/workflows/worker.yml`.
+- `npm run dry-run` checks bundling read-only. `npm run deploy` is the Cloudflare
+  Workers Builds deploy command and refuses to run outside it (`scripts/deploy_guard.mjs`
+  requires `WORKERS_CI=1`, branch `main`, HEAD == `WORKERS_CI_COMMIT_SHA`; exits 2 locally);
+  releases only come from Workers Builds on `main`.
   Neither unit tests nor dry-run prove real Mihomo or Actions execution.
 
 ## Local HTTP
@@ -265,7 +266,7 @@ Validation boundaries:
 | Local verifier | `BEST_IP_TEST_SUBSCRIPTION_URL`; `BEST_IP_API_BASE` http://127.0.0.1:8000; `BEST_IP_REAL_SCAN_TIMEOUT_SECONDS` 1800; `BEST_IP_REQUEST_ID`; `BEST_IP_ALLOW_PARTIAL` opt-in |
 | Worker | `SCAN_KEY_ID`, `SCAN_TOKEN_SECRET`, `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY`, `SITE_PASSWORD`, `SUBSCRIPTION_RELAY_TOKEN`; `ASSETS` binding |
 | Actions | secrets `SCAN_PRIVATE_KEY_PEM`, `IPURE_CONFIG_YAML`, `SCAN_RELAY_TOKEN`; variables `SCAN_KEY_ID`, `SCAN_RELAY_URL`; temporary (step-scoped) `BEST_IP_ENVELOPE`, `REQUEST_ID`, `KEY_ID`, `EXPECTED_KEY_ID`, `RELAY_URL`, `RELAY_TOKEN`, `IPURE_CONFIG_YAML`, `SCAN_PRIVATE_KEY_PEM` (written to `$RUNNER_TEMP/scan-private.pem` and deleted as soon as the envelope is decrypted), `BEST_IP_SUBSCRIPTION_RELAY_URL`, `BEST_IP_SUBSCRIPTION_RELAY_TOKEN`; job-level `BEST_IP_PYTHON_DIR`, `BEST_IP_MIHOMO_ARCHIVE_DIR` (the cached interpreter and Mihomo archive); run identity from `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` |
-| Deployment CI | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` |
+| Deployment (Workers Builds) | none configured; guard reads the injected `WORKERS_CI`, `WORKERS_CI_BRANCH`, `WORKERS_CI_COMMIT_SHA` |
 
 ## Frontend transport boundary
 

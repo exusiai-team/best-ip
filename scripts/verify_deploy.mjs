@@ -197,7 +197,7 @@ async function waitForAssets(session) {
  *
  * 必须由一个函数承担，而且 main() 的每条提前退出路径都要走它：`process.exitCode = 1` 只在这里设置，
  * 之前写成 `return` 的那些分支（CSRF 缺失、登录失败）会把已经记进 failures 的 FAIL 连同退出码一起丢掉——
- * 门禁在工作流里以 exit 0 收场，而「线上内容与 commit 逐字节一致」这一项根本没跑，正是 worker.yml
+ * 门禁以 exit 0 收场，而「线上内容与 commit 逐字节一致」这一项根本没跑，正是这道门禁
  * 想避免的「绿灯但没验」。SITE_PASSWORD 轮换或填错时就会走到那条路。
  */
 function finish() {

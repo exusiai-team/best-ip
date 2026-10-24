@@ -63,12 +63,20 @@ npm run dev:no-reload
 
 ## 部署
 
-发布是流水线的一部分，也只能是流水线的一部分：本地 `npm run deploy` 现在会被 `scripts/deploy_guard.mjs` 直接拒绝（退出码 2）。发布只有两条远程路径：
+发布走 Cloudflare Workers Builds（Worker 在控制台用 OAuth 连接本仓库），本地 `npm run deploy` 会被 `scripts/deploy_guard.mjs` 直接拒绝（退出码 2）。发布路径：
 
-1. **自动**：push 到 `main` → CI（Ruff、`npm run check` 语法检查、`wrangler deploy --dry-run`）成功后，`Deploy Cloudflare Worker` 工作流通过 `workflow_run` 自动发布，且发布的就是 CI 验过的那一个 commit。
-2. **手动重发一次**：`gh workflow run worker.yml --ref main`，或在 GitHub 页面上派发该工作流（`workflow_dispatch`）。
+1. **自动**：push（或合并 PR）到 `main` → Workers Builds 检出该 commit，执行部署命令 `npm run deploy`。
+2. **手动重发一次**：在 Cloudflare 控制台该 Worker 的 Deployments / Builds 里对 `main` 重新构建。
 
-为什么本地不许发布：本机检出可能是 CRLF（`core.autocrlf=true`，而仓库 blob 是 LF），也可能带着未提交的改动，`wrangler deploy` 会把这些字节原样发到线上，而它只报「上传成功」，不会说发上去的是不是仓库里的内容——历史上线上就这样跑过与任何 commit 都不一致的资产（`app/api.js` 线上 12327B vs blob 12089B，多出的 238 字节全是 CR）。所以守卫在发布前还要断言三件事：分支是 `main`（`--ref` 派发到别的分支不能上线）、`HEAD` 等于本次运行声明的 commit、以及 assets 目录下每个文件都被 git 跟踪且工作区字节逐字节等于该 commit 的 blob。这三条合起来，才把「发布内容等于某个 commit」从约定变成机械判据——发布后同一工作流还会对线上再做一遍逐字节比对。
+Workers Builds 的构建设置（Settings → Build）：
+
+- 生产分支：`main`；构建命令：`npm ci`；部署命令：**`npm run deploy`**。不要用默认的 `npx wrangler deploy`，那样会绕过下面的守卫。
+- 非生产分支：用默认的预览命令（只出预览版本，不上线），或直接关掉非生产分支构建。不要设成 `npm run deploy`，守卫会以退出码 3 拒绝。
+- Build variables 一个都不需要；运行时密钥只放 Worker 的 Variables and Secrets（见下文「平台配置」），`wrangler deploy` 不会覆盖它们。
+
+注意：Workers Builds 不等 GitHub 上的 `CI` 工作流结果，push 到 `main` 就会构建。所以合并前要看 PR 上的 CI 是绿的；也可以在 GitHub 的分支保护里把 `CI / test` 设成必过检查。
+
+为什么本地不许发布：本机检出可能是 CRLF（`core.autocrlf=true`，而仓库 blob 是 LF），也可能带着未提交的改动，`wrangler deploy` 会把这些字节原样发到线上，而它只报「上传成功」，不会说发上去的是不是仓库里的内容——历史上线上就这样跑过与任何 commit 都不一致的资产（`app/api.js` 线上 12327B vs blob 12089B，多出的 238 字节全是 CR）。所以守卫只在 Workers Builds 里放行（`WORKERS_CI=1`），并在发布前断言三件事：构建分支是 `main`（`WORKERS_CI_BRANCH`）、`HEAD` 等于本次构建声明的 commit（`WORKERS_CI_COMMIT_SHA`）、以及 assets 目录下每个文件都被 git 跟踪且工作区字节逐字节等于该 commit 的 blob。
 
 本地能做的只有只读检查：
 
@@ -80,13 +88,9 @@ npm run verify-notes  # 笔记门禁
 $env:SITE_PASSWORD="…"; npm run verify:deploy   # 核对线上内容与当前 commit 是否逐字节一致
 ```
 
-发布之后同一个工作流会跑 `npm run verify:deploy` 做部署后自证，分两层：无凭据检查（登录页可达、CSP 仍放行签名 blob、静态资源仍被会话门挡住），以及有凭据的逐字节比对（用 `SITE_PASSWORD` 登录后，把 `frontend-next/` 下每个被 git 跟踪的文件与它在该 commit 里的 blob 比对）。`wrangler deploy` 只报「上传成功」，它不说线上提供的是不是这一个 commit 的内容；这一步才是那个静默漂移的门。新资产在边缘生效有个窗口（可能先返回 404，也可能先返回旧字节），这一步在宽限预算内会重取，不会把传播窗口判成漂移。
+部署后自证改为手动：发布完成后在本地跑 `npm run verify:deploy`（见上），分两层：无凭据检查（登录页可达、CSP 仍放行签名 blob、静态资源仍被会话门挡住），以及有凭据的逐字节比对（用 `SITE_PASSWORD` 登录后，把 `frontend-next/` 下每个被 git 跟踪的文件与它在该 commit 里的 blob 比对）。新资产在边缘生效有个窗口（可能先返回 404，也可能先返回旧字节），这一步在宽限预算内会重取，不会把传播窗口判成漂移。
 
-`.github/workflows/worker.yml` 需要以下 GitHub Actions secrets：
-
-- `CLOUDFLARE_API_TOKEN`
-- `CLOUDFLARE_ACCOUNT_ID`
-- `SITE_PASSWORD`（部署后自证用；缺失时该步骤直接失败，不会降级成「绿灯但没验」）
+部署不再需要任何 GitHub Actions secret（原来的 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID` 可以删除）。GitHub 上剩下的 secrets/variables 都是扫描用的，见「平台配置」第 4 条；`SITE_PASSWORD` 只有 `Verify scan flow` 工作流还在用，不用它可以删。
 
 Worker 没有第三方运行时 npm 依赖；密码会话和 GitHub App RS256 签名都使用原生 Web Crypto。`package.json` 与锁文件保留模块声明、语法检查命令和 Wrangler 部署工具。
 
@@ -106,8 +110,9 @@ Worker 使用 Static Assets 托管 `frontend-next/`；当前配置不使用 Clou
    - `GITHUB_APP_PRIVATE_KEY`
    - `SCAN_TOKEN_SECRET`
    - `SITE_PASSWORD`
+   - `SUBSCRIPTION_RELAY_TOKEN`：runner 回调 Worker（订阅中继与 `/api/scan-progress`）的令牌，至少 16 个字符，必须与 Actions secret `SCAN_RELAY_TOKEN` 相同。
 
-4. 配置 Actions secrets `SCAN_PRIVATE_KEY_PEM`、`IPURE_CONFIG_YAML`，并配置 Actions variable `SCAN_KEY_ID`。`IPURE_CONFIG_YAML` 可选，保存与本地 `config/ipure.yml` 相同的请求头覆盖内容；Actions 扫描前生成该文件，结束时清理，不上传到结果 artifact。IPure 不需要凭据，因此该 Secret 为空也不影响评分。Worker 仅调度扫描，不查询 IPure，也不向前端提供任何第三方请求头。可用 `gh secret set IPURE_CONFIG_YAML --repo silverwolfxai/best-ip < config/ipure.yml` 同步本地配置到云端；修改本地文件不会自动更新 GitHub Secret。
+4. 配置 Actions secrets `SCAN_PRIVATE_KEY_PEM`、`SCAN_RELAY_TOKEN`、`IPURE_CONFIG_YAML`，并配置 Actions variables `SCAN_KEY_ID`、`SCAN_RELAY_URL`（Worker 的 https 地址）。`IPURE_CONFIG_YAML` 保存与本地 `config/ipure.yml` 相同的请求头覆盖内容，`scan.yml` 要求它非空且带 IPure 验证 cookie，缺失时扫描在准备阶段失败；Actions 扫描前生成该文件，结束时清理，不上传到结果 artifact。Worker 仅调度扫描，不查询 IPure，也不向前端提供任何第三方请求头。可用 `gh secret set IPURE_CONFIG_YAML --repo silverwolfxai/best-ip < config/ipure.yml` 同步本地配置到云端；修改本地文件不会自动更新 GitHub Secret。
 
 打开网站后输入访问密码。登录会话有效期 12 小时，保存在 Secure、HttpOnly、SameSite=Strict 的主机专属 Cookie 中；页面提供退出登录入口。修改 `SITE_PASSWORD` 或 `SCAN_TOKEN_SECRET` 后旧会话失效。退出登录清除当前浏览器 Cookie，其他浏览器的会话不受影响。密码和签名密钥只放 Worker 运行时 Secrets，不放 Build variables 或仓库。
 
