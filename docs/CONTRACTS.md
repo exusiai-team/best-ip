@@ -20,9 +20,9 @@ materialize the same records. The documentation IP is deliberately non-productio
   The workflow decrypts with `scripts/decrypt_subscription.mjs`, then runs
   `scripts/run_scan.py` directly against the shared scan core. No HTTP server or
   acceptance script runs in production. See [CLI.md](CLI.md) for arguments and exits.
-- `npm run dry-run` checks bundling read-only. `npm run deploy` is the pipeline's
-  publish step and refuses to run outside GitHub Actions (`scripts/deploy_guard.mjs`
-  exits 2 locally); releases only come from `.github/workflows/worker.yml`.
+- `npm run dry-run` checks bundling read-only. Releases only come from Cloudflare
+  Workers Builds on `main` (`npx wrangler@latest deploy`, no install step). `npm run deploy`
+  is a local tripwire: `scripts/deploy_guard.mjs` exits 2 outside Workers Builds. `.gitattributes` pins every text file to LF.
   Neither unit tests nor dry-run prove real Mihomo or Actions execution.
 
 ## Local HTTP
@@ -183,7 +183,7 @@ an integer 0..100, the sentinel `-1`, or null, and `score` must equal
 `ipure_scores.total`. `-1` means IPure marked that total/scenario as
 `restricted` (region-blocked): the value is off the 0..100 scale, is rendered as
 the number `-1` in neutral grey, and must not be read as "zero" or "lowest".
-Nothing else is accepted — `-2` and `101` are rejected by both validators.
+Nothing else is accepted — `-2` and `101` are rejected by the record validator.
 Level codes, verdicts and per-scenario level maps are not part of the record:
 they stay inside `requests.ipure.data` as raw upstream evidence, so the frontend
 has no level text to render. `data.total` and `data.scenarios[].score` keep the
@@ -216,7 +216,7 @@ AS name, `asn`), kind (`usage_type`, `is_residential`, `is_datacenter` = hosting
 (each `"ipure"`, `"coffee"` or null) says who supplied each group. `exit_ip` is still
 discovered by the Coffee trace (an IPure query needs an address) and is marked `"ipure"`
 when IPure's echoed `ip` equals it. The six new top-level fields are optional — artifacts
-written before them still validate — and both validators reject a non-string geo field, a
+written before them still validate — and the record validator rejects a non-string geo field, a
 `usage_type` outside the six documented values, or a `network_source` with other keys or
 values.
 Retry metadata, when present, must be internally consistent.
@@ -246,9 +246,13 @@ disagrees with its records — still ends the scan on the first attempt.
 
 Validation boundaries:
 
-1. Python and browser validators reject failed records with an exit IP and
-   successful records missing proxy evidence. Shared fixtures exercise both
-   implementations; browser validation also applies to local JSON imports.
+1. Record rules live in one place, `backend/app/results/validation.py`: failed
+   records with an exit IP and successful records missing proxy evidence are
+   rejected when a node is written, when the manifest is finalized and again by
+   `build_artifact` before publishing. The browser reader
+   (`frontend-next/app/artifact/reader.js`) checks integrity only — run identity,
+   `result_sha256`, counts and manifest/record agreement. `tests/test_artifact_reader.py`
+   feeds a runner-built artifact to that reader.
 2. `status.usable` means zero failed AND zero partial nodes in sanitizer/browser.
    Partial artifacts are structurally accepted but usable=false. An all-failed
    manifest is structurally complete yet unusable; workflow success is not node success.
@@ -261,11 +265,11 @@ Validation boundaries:
 | --- | --- |
 | Local | `BEST_IP_MIHOMO_PATH` runtime/mihomo/mihomo(.exe); `BEST_IP_LOCAL_DEV` false; `BEST_IP_LOCAL_FRONTEND_ORIGIN` unset; `BEST_IP_OUTBOUND_INTERFACE` unset |
 | Limits | `BEST_IP_SUBSCRIPTION_MAX_BYTES` 5242880; `BEST_IP_MAX_NODES` 500; `BEST_IP_MAX_PARALLEL_JOBS` 2; `BEST_IP_MAX_PARALLEL_NODES` min(16, max(8, CPU count)); `BEST_IP_MAX_NODE_ATTEMPTS` 3; `BEST_IP_NODE_RETRY_BACKOFF_MS` 500; `BEST_IP_PAGE_TIMEOUT_MS` 45000; `BEST_IP_SUBSCRIPTION_TIMEOUT_SECONDS` 30 |
-| Download | `BEST_IP_MIHOMO_TAG`, `BEST_IP_MIHOMO_ARCHIVE_SHA256` optional command defaults; workflow pins v1.19.30 and archive SHA-256 |
+| Download | `BEST_IP_MIHOMO_TAG`, `BEST_IP_MIHOMO_ARCHIVE_SHA256` optional; default is the latest release verified against the GitHub asset digest (required under Actions); `GITHUB_TOKEN` authenticates the API call |
 | Local verifier | `BEST_IP_TEST_SUBSCRIPTION_URL`; `BEST_IP_API_BASE` http://127.0.0.1:8000; `BEST_IP_REAL_SCAN_TIMEOUT_SECONDS` 1800; `BEST_IP_REQUEST_ID`; `BEST_IP_ALLOW_PARTIAL` opt-in |
 | Worker | `SCAN_KEY_ID`, `SCAN_TOKEN_SECRET`, `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY`, `SITE_PASSWORD`, `SUBSCRIPTION_RELAY_TOKEN`; `ASSETS` binding |
 | Actions | secrets `SCAN_PRIVATE_KEY_PEM`, `IPURE_CONFIG_YAML`, `SCAN_RELAY_TOKEN`; variables `SCAN_KEY_ID`, `SCAN_RELAY_URL`; temporary (step-scoped) `BEST_IP_ENVELOPE`, `REQUEST_ID`, `KEY_ID`, `EXPECTED_KEY_ID`, `RELAY_URL`, `RELAY_TOKEN`, `IPURE_CONFIG_YAML`, `SCAN_PRIVATE_KEY_PEM` (written to `$RUNNER_TEMP/scan-private.pem` and deleted as soon as the envelope is decrypted), `BEST_IP_SUBSCRIPTION_RELAY_URL`, `BEST_IP_SUBSCRIPTION_RELAY_TOKEN`; job-level `BEST_IP_PYTHON_DIR`, `BEST_IP_MIHOMO_ARCHIVE_DIR` (the cached interpreter and Mihomo archive); run identity from `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` |
-| Deployment CI | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` |
+| Deployment (Workers Builds) | none configured; guard reads the injected `WORKERS_CI`, `WORKERS_CI_BRANCH` |
 
 ## Frontend transport boundary
 

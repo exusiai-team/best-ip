@@ -2,7 +2,7 @@
    前端契约门禁（frontend-next）
    运行：node scripts/check_frontend_contracts.mjs（由 npm run check 串起）
    ----------------------------------------------------------------------------
-   这里守的四条约定原先只写在笔记与源码注释里，靠人记住：
+   这里守的四条约定原先只写在设计记录与源码注释里，靠人记住：
 
      a. frontend-next 源码里不得出现**标记形式**的 `style=` 属性；
      b. frontend-next/index.html 的 <thead>…</thead> 区间内零控件（表头只由 app/render.js 生成）；

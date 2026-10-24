@@ -19,13 +19,10 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-MIHOMO_TAG = "v1.19.30"
 LOCAL_HOST = "127.0.0.1"
 DEFAULT_API_PORT = 8000
 DEFAULT_FRONTEND_PORT = 5173
 # 本地静态根 = 线上部署的那份前端（wrangler.jsonc 的 assets.directory 指向 frontend-next）。
-# 旧版 frontend/ 已不部署（死代码，保留不动）：本地再指着它跑，等于「本地看到的不是线上那份」，
-# 而且本地一切正常也证明不了线上那份源码能被实时跑起来。
 FRONTEND_DIR_NAME = "frontend-next"
 # CSP 的唯一真源是 Worker（每个 text/html 响应都挂这一串），本地不抄第二份。
 WORKER_RESPONSES = ROOT_DIR / "worker" / "responses.js"
@@ -94,13 +91,11 @@ def _ensure_mihomo() -> Path:
         return path
     if configured:
         raise SystemExit(f"BEST_IP_MIHOMO_PATH 指向的文件不存在：{path}")
-    print(f"首次启动：正在安装 Mihomo {MIHOMO_TAG} ...", flush=True)
+    print("首次启动：正在安装最新版 Mihomo ...", flush=True)
     result = subprocess.run(
         [
             sys.executable,
             str(ROOT_DIR / "scripts" / "download_mihomo.py"),
-            "--tag",
-            MIHOMO_TAG,
         ],
         cwd=ROOT_DIR,
         check=False,

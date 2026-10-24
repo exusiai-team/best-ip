@@ -15,7 +15,7 @@
    为什么 token 只放内存：它是一张两小时有效、只对本次 request_id 生效的凭证
    （worker/auth.js 的 signScanToken）。放进 localStorage/sessionStorage 等于给页面引入
    一处可被读走的长效凭证；而刷新一页的代价很小——刷新后 /api/scans/latest 依然会如实
-   说「最近一次扫描还在进行」。这条限制记在笔记里，不靠提示文案遮掩。
+   说「最近一次扫描还在进行」。这条限制是有意的，不靠提示文案遮掩。
 
    为什么轮询有上限：scan.yml 是 timeout-minutes: 30，排队也可能永远排不上。沿用旧前端的
    口径——从没跑起来超过 13 分钟、跑起来超过 31 分钟就停止等待，并如实说「任务可能仍在
@@ -56,7 +56,7 @@ export const SCAN_PROGRESS_POLL_MS = 1_000;
 // 同形（都挂 code、可选 title），401/403/503 三句也各写一份。见该文件头部。
 
 /**
- * 提交前的快检查，与 frontend/src/transport/http.js 的 validateSubscriptionUrl 同文案。
+ * 提交前的快检查（文案沿用旧前端的 validateSubscriptionUrl）。
  * 这不是多余的一份：加密模块内部也会校验，但那一步已经生成了 AES 密钥、可能还取了公钥，
  * 而地址最常见的手误（漏了 https:// 、粘成了带账号密码的内网地址）不值得先清空表格再报错。
  */
@@ -76,8 +76,8 @@ export function validateSubscriptionUrl(value) {
 /**
  * 给 scan-crypto.js 注入的 fetchImpl 套上超时。
  * 那条取公钥的请求（importPublicKey 里的 fetchImpl(url, { cache: "no-store" })）原本没有超时，
- * 挂住的话页面会永久停在「正在加密订阅地址并交给扫描网关…」。scan-crypto.js 不能改（它与
- * frontend/src/crypto.js 是人工同步的副本），但 fetchImpl 是注入的，所以在注入点补上。
+ * 挂住的话页面会永久停在「正在加密订阅地址并交给扫描网关…」。超时放在注入点，
+ * 让 scan-crypto.js 只管加密、不管网络策略。
  */
 function withPublicKeyTimeout(fetchImpl) {
   return (input, init) => fetchWithTimeout(fetchImpl, input, init, PUBLIC_KEY_TIMEOUT_MS);

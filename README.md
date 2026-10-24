@@ -41,12 +41,12 @@ npm run dev:no-reload
 
 可用 `--port 8080` 更换后端 API 端口、`--frontend-port 5174` 更换前端端口、`--no-open` 禁止自动打开浏览器。手动启动时必须同时设置 `BEST_IP_LOCAL_DEV=1` 与精确的 `BEST_IP_LOCAL_FRONTEND_ORIGIN=http://127.0.0.1:<前端端口>`；不要将任一服务绑定到局域网或公网地址，因为本地模式有意跳过生产 Worker 的密码登录与 scan token，只用于本机调试。
 
-固定正式版本（如 `v1.19.30`）安装遇到 GitHub API `403`/`429` 时，自动改用官方 Release 直链，不依赖第三方镜像。`latest` 与非标准 tag 不猜测下载地址。设置 `BEST_IP_MIHOMO_ARCHIVE_SHA256` 可强制校验归档；回退时若未指定摘要，则仅依赖官方 HTTPS，计算出的 SHA-256 不代表真实性校验。已有核心可通过 `BEST_IP_MIHOMO_PATH` 指定路径，跳过下载。
+Mihomo 默认安装最新 release，并用 GitHub 给出的资产摘要（`digest`）校验归档；在 GitHub Actions 里拿不到摘要就拒绝安装。设置 `GITHUB_TOKEN` 可避免匿名 API 限流。仍可用 `BEST_IP_MIHOMO_TAG` 指定版本（指定正式版本时，API 返回 `403`/`429` 会改用官方 Release 直链），或用 `BEST_IP_MIHOMO_ARCHIVE_SHA256` 额外核对摘要。已有核心可通过 `BEST_IP_MIHOMO_PATH` 指定路径，跳过下载。
 
 ## 生产行为
 
 - 输入必须是顶部含 `proxies` 的 UTF-8 Mihomo/Clash YAML 公开 HTTP/HTTPS 地址。
-- 浏览器使用 AES-256-GCM 加密订阅 URL，再用 `frontend/scan-public.pem` 对应的 RSA-OAEP-3072 公钥包裹 AES key；明文 URL 不进入 Worker API、GitHub workflow input 或 artifact。
+- 浏览器使用 AES-256-GCM 加密订阅 URL，再用 `frontend-next/scan-public.pem` 对应的 RSA-OAEP-3072 公钥包裹 AES key；明文 URL 不进入 Worker API、GitHub workflow input 或 artifact。
 - Worker 固定调度 `silverwolfxai/best-ip` 的 `main` 分支和 `scan.yml`，不提供通用 GitHub API 代理。
 - 每个节点尝试使用独立 Mihomo 进程、端口、连接池和临时目录；默认最多 `min(16, max(8, CPU 核数))` 个节点并发（上限为订阅节点数），每节点最多 3 次尝试：首次失败后余下的尝试**并行**跑，第一份非失败记录胜出、其余立即取消并确认清理（永久连不上的节点从约 18 秒降到约 11 秒）。
 - 出口 IP、国家和地区、服务商 / ISP、ASN、接入（住宅 / 移动 / 商业 / 机房 / 教育 / 政府）与原生性以 IPure `/api/lookup` 报告为准（`geo.countryName/country/region/city`、`asn.asn/org/name`、`usageType`、`nativeType`）：报告里说了的那一组就用它，没说的那一组才回落到 Coffee 的归属查询；每组来源记在节点记录的 `network_source`，页面在对应单元格的 title 里标出「来源：IPure / Coffee」。出口 IP 仍由 trace 发现（IPure 查询必须带上一个 IP），IPure 回显一致时记为由 IPure 确认。
@@ -59,36 +59,39 @@ npm run dev:no-reload
 - 扫描进度画成三段步骤条（启动 → 扫描节点 → 校验结果；提交、排队、准备环境合成「启动」一格），配每秒走的用时。面板主体是**逐节点格子**：每个节点一格，实时显示等待 / 启动代理 / 连接检测站 / 查询 IP 质量 / 重试，用时每秒往上走，终态给完整 / 部分（缺哪几项）/ 失败（白名单原因）。读数来自 runner 约每秒一次的回报（`POST /api/scan-progress`，存在 Worker 的 `SCAN_PROGRESS` Durable Object 里），页面每秒读一次 `GET /api/scans/{id}/progress`（只读 Durable Object，不耗 GitHub API）。格子里没有出口 IP 与评分；读不到回报时进度条退回不定状态，不伪造数字。完成那一刻面板计数改用终态 artifact，格子只在三种终态个数与 artifact 逐一相同时保留——表格与导出仍以校验过的 artifact 为唯一事实源。
 - 刷新页面或换标签页后，若最近一次扫描还在排队/执行，页面会自动跟进它的进度（`/api/scans/latest` 的 `active`），跑完自动换上新结果；跟进只读，不能停止（停止需要发起时内存里的 scan token）。
 - 页面轮询首轮 1.5 秒、每次 ×1.5、上限 4 秒；节点检测完（runner 报了 packaging/done）后改为每秒一次，运行一结束就取结果。`scan.yml` 把单任务节点并发设为 16（托管 runner 默认公式只给 8）。
-- `scan.yml` 的准备段压到三步：校验输入 + 写 IPure 配置 + 解密订阅一步完成（私钥用完即删）；uv 管理的 Python 3.13、`.venv` 与 Mihomo 压缩包同一个缓存，命中时不装 uv、不跑 `uv sync`，直接 `.venv/bin/python`；`uv.lock` / `pyproject.toml` / Mihomo 版本变化时才走一次装 uv + `uv sync` 并存回缓存。
+- `scan.yml` 的准备段压到三步：校验输入 + 写 IPure 配置 + 解密订阅一步完成（私钥用完即删）；uv 管理的 Python 3.13 与 `.venv` 按天缓存，命中时不装 uv、不跑 `uv sync`，直接 `.venv/bin/python`；每天第一次扫描（或 `pyproject.toml` 变化时）重新解析最新依赖并存回缓存。Mihomo 每次取最新 release。
 
 ## 部署
 
-发布是流水线的一部分，也只能是流水线的一部分：本地 `npm run deploy` 现在会被 `scripts/deploy_guard.mjs` 直接拒绝（退出码 2）。发布只有两条远程路径：
+发布走 Cloudflare Workers Builds（Worker 在控制台用 OAuth 连接本仓库），本地 `npm run deploy` 会被 `scripts/deploy_guard.mjs` 直接拒绝（退出码 2）。发布路径：
 
-1. **自动**：push 到 `main` → CI（Ruff、`npm run check` 语法检查、`wrangler deploy --dry-run`）成功后，`Deploy Cloudflare Worker` 工作流通过 `workflow_run` 自动发布，且发布的就是 CI 验过的那一个 commit。
-2. **手动重发一次**：`gh workflow run worker.yml --ref main`，或在 GitHub 页面上派发该工作流（`workflow_dispatch`）。
+1. **自动**：push（或合并 PR）到 `main` → Workers Builds 检出该 commit，执行部署命令 `npx wrangler@latest deploy`。
+2. **手动重发一次**：在 Cloudflare 控制台该 Worker 的 Deployments / Builds 里对 `main` 重新构建。
 
-为什么本地不许发布：本机检出可能是 CRLF（`core.autocrlf=true`，而仓库 blob 是 LF），也可能带着未提交的改动，`wrangler deploy` 会把这些字节原样发到线上，而它只报「上传成功」，不会说发上去的是不是仓库里的内容——历史上线上就这样跑过与任何 commit 都不一致的资产（`app/api.js` 线上 12327B vs blob 12089B，多出的 238 字节全是 CR）。所以守卫在发布前还要断言三件事：分支是 `main`（`--ref` 派发到别的分支不能上线）、`HEAD` 等于本次运行声明的 commit、以及 assets 目录下每个文件都被 git 跟踪且工作区字节逐字节等于该 commit 的 blob。这三条合起来，才把「发布内容等于某个 commit」从约定变成机械判据——发布后同一工作流还会对线上再做一遍逐字节比对。
+Workers Builds 的构建设置（Settings → Build）：
 
-本地能做的只有只读检查：
+- 生产分支：`main`；构建命令：留空；部署命令：`npx wrangler@latest deploy`（不装依赖、不锁版本，每次用最新的 wrangler）。
+- 非生产分支：用默认的预览命令（只出预览版本，不上线），或直接关掉非生产分支构建。
+- `npm run deploy` 只是本地的拦截：它先跑 `scripts/deploy_guard.mjs`，不在 Workers Builds 里就以退出码 2 拒绝，防止从本机直接发布。
+- Build variables 一个都不需要；运行时密钥只放 Worker 的 Variables and Secrets（见下文「平台配置」），`wrangler deploy` 不会覆盖它们。
+
+注意：Workers Builds 不等 GitHub 上的 `CI` 工作流结果，push 到 `main` 就会构建。所以合并前要看 PR 上的 CI 是绿的；也可以在 GitHub 的分支保护里把 `CI / test` 设成必过检查。
+
+为什么本地不许发布：本机检出可能是 CRLF 或带着未提交的改动，`wrangler deploy` 会把这些字节原样发上线（历史上出过一次）。现在由 `.gitattributes`（全仓 LF）和 Workers Builds 的干净检出保证上线内容就是某个 commit，守卫只负责拦住本机发起的发布。
+
+本地能做的检查（与 CI 相同）：
 
 ```powershell
-npm ci
-npm run check         # 逐文件 node --check
+npm install
+npm run check         # 语法 + 前端契约 + MHTML 往返
 npm run dry-run       # wrangler deploy --dry-run，只看打包
-npm run verify-notes  # 笔记门禁
-$env:SITE_PASSWORD="…"; npm run verify:deploy   # 核对线上内容与当前 commit 是否逐字节一致
+uv run ruff check .
+uv run pytest -q      # 扫描核心、结果校验、CLI 端到端、产物读回（替身 Mihomo，不联网）
 ```
 
-发布之后同一个工作流会跑 `npm run verify:deploy` 做部署后自证，分两层：无凭据检查（登录页可达、CSP 仍放行签名 blob、静态资源仍被会话门挡住），以及有凭据的逐字节比对（用 `SITE_PASSWORD` 登录后，把 `frontend-next/` 下每个被 git 跟踪的文件与它在该 commit 里的 blob 比对）。`wrangler deploy` 只报「上传成功」，它不说线上提供的是不是这一个 commit 的内容；这一步才是那个静默漂移的门。新资产在边缘生效有个窗口（可能先返回 404，也可能先返回旧字节），这一步在宽限预算内会重取，不会把传播窗口判成漂移。
+部署不再需要任何 GitHub Actions secret（原来的 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID` 可以删除）。GitHub 上剩下的 secrets/variables 都是扫描用的，见「平台配置」第 4 条；`SITE_PASSWORD` 只有 `Verify scan flow` 工作流还在用，不用它可以删。
 
-`.github/workflows/worker.yml` 需要以下 GitHub Actions secrets：
-
-- `CLOUDFLARE_API_TOKEN`
-- `CLOUDFLARE_ACCOUNT_ID`
-- `SITE_PASSWORD`（部署后自证用；缺失时该步骤直接失败，不会降级成「绿灯但没验」）
-
-Worker 没有第三方运行时 npm 依赖；密码会话和 GitHub App RS256 签名都使用原生 Web Crypto。`package.json` 与锁文件保留模块声明、语法检查命令和 Wrangler 部署工具。
+Worker 没有第三方运行时 npm 依赖；密码会话和 GitHub App RS256 签名都使用原生 Web Crypto。`package.json` 只保留模块声明、语法检查命令和 Wrangler 部署工具。
 
 Worker 使用 Static Assets 托管 `frontend-next/`；当前配置不使用 Cloudflare Pages 或 GitHub Pages。实时进度用一个 SQLite 后端的 Durable Object（`wrangler.jsonc` 的 `SCAN_PROGRESS` 绑定与 `v1` 迁移），首次发布时由迁移自动创建，Workers 免费计划可用，不需要在控制台事先建资源；绑定缺失时页面只是退回「只显示步骤」。
 
@@ -100,14 +103,15 @@ Worker 使用 Static Assets 托管 `frontend-next/`；当前配置不使用 Clou
 2. 在 Worker 的 Settings → Variables and Secrets 添加 Secret `SITE_PASSWORD`：使用密码管理器生成至少 16 个字符的随机密码（最多 1024 字符）。无需 Cloudflare Access；如果之前启用了 Worker 域名的 Access 保护，请关闭该保护，并移除覆盖该域名的 Zero Trust Access Application。原来的三个 `ACCESS_*` 变量可以删除。
 3. 配置 Worker secrets/variables：
 
-   - `SCAN_KEY_ID`：`frontend/scan-public.pem` 的 SPKI DER SHA-256 指纹。
+   - `SCAN_KEY_ID`：`frontend-next/scan-public.pem` 的 SPKI DER SHA-256 指纹。
    - `GITHUB_APP_ID`
    - `GITHUB_APP_INSTALLATION_ID`
    - `GITHUB_APP_PRIVATE_KEY`
    - `SCAN_TOKEN_SECRET`
    - `SITE_PASSWORD`
+   - `SUBSCRIPTION_RELAY_TOKEN`：runner 回调 Worker（订阅中继与 `/api/scan-progress`）的令牌，至少 16 个字符，必须与 Actions secret `SCAN_RELAY_TOKEN` 相同。
 
-4. 配置 Actions secrets `SCAN_PRIVATE_KEY_PEM`、`IPURE_CONFIG_YAML`，并配置 Actions variable `SCAN_KEY_ID`。`IPURE_CONFIG_YAML` 可选，保存与本地 `config/ipure.yml` 相同的请求头覆盖内容；Actions 扫描前生成该文件，结束时清理，不上传到结果 artifact。IPure 不需要凭据，因此该 Secret 为空也不影响评分。Worker 仅调度扫描，不查询 IPure，也不向前端提供任何第三方请求头。可用 `gh secret set IPURE_CONFIG_YAML --repo silverwolfxai/best-ip < config/ipure.yml` 同步本地配置到云端；修改本地文件不会自动更新 GitHub Secret。
+4. 配置 Actions secrets `SCAN_PRIVATE_KEY_PEM`、`SCAN_RELAY_TOKEN`、`IPURE_CONFIG_YAML`，并配置 Actions variables `SCAN_KEY_ID`、`SCAN_RELAY_URL`（Worker 的 https 地址）。`IPURE_CONFIG_YAML` 保存与本地 `config/ipure.yml` 相同的请求头覆盖内容，`scan.yml` 要求它非空且带 IPure 验证 cookie，缺失时扫描在准备阶段失败；Actions 扫描前生成该文件，结束时清理，不上传到结果 artifact。Worker 仅调度扫描，不查询 IPure，也不向前端提供任何第三方请求头。可用 `gh secret set IPURE_CONFIG_YAML --repo silverwolfxai/best-ip < config/ipure.yml` 同步本地配置到云端；修改本地文件不会自动更新 GitHub Secret。
 
 打开网站后输入访问密码。登录会话有效期 12 小时，保存在 Secure、HttpOnly、SameSite=Strict 的主机专属 Cookie 中；页面提供退出登录入口。修改 `SITE_PASSWORD` 或 `SCAN_TOKEN_SECRET` 后旧会话失效。退出登录清除当前浏览器 Cookie，其他浏览器的会话不受影响。密码和签名密钥只放 Worker 运行时 Secrets，不放 Build variables 或仓库。
 
@@ -129,19 +133,19 @@ Worker 会精确核对 request ID、workflow path、事件、分支、run/attemp
 
 ## 验证
 
-仓库保留运行源码、部署配置与依赖锁文件；本地工具状态、凭据、Mihomo 二进制和扫描结果不进入 Git。测试套件已在提交 `928c770` 中删除、`/tests/` 同时加入 `.gitignore`，因此本仓库不再有 Python 或 JavaScript 用例：`npm test` 只做语法检查（`node --check`），CI 不再运行 `pytest`。门禁保留的是一条能真跑通的检查 —— Ruff、`npm test`（语法）、`npm run verify-notes` 和 `wrangler deploy --dry-run`。本地启动使用 `--no-dev`，不安装 pytest、Ruff 等测试工具。生产 CLI 用法见 [docs/CLI.md](docs/CLI.md)，接口与结果格式见 [docs/CONTRACTS.md](docs/CONTRACTS.md)。
+仓库保留运行源码与部署配置（不提交依赖锁文件）；本地工具状态、凭据、Mihomo 二进制和扫描结果不进入 Git。`tests/` 用替身 Mihomo 与替身采集器覆盖扫描核心（重试并行与清理、DNS 引导出口）、结果校验与产物、CLI 端到端，以及「runner 产物能被浏览器 `readArtifact` 读回」的跨语言契约；不联网、不需要真实订阅。CI 跑 Ruff、pytest、`npm run check` 与 `wrangler deploy --dry-run`。生产 CLI 用法见 [docs/CLI.md](docs/CLI.md)，接口与结果格式见 [docs/CONTRACTS.md](docs/CONTRACTS.md)。
 
 ```powershell
 uv sync --dev
 uv run ruff check .
-npm ci
-npm test
-npm run verify-notes
+uv run pytest -q
+npm install
+npm run check
 npm run dry-run
 git diff --check
 ```
 
-`scan.yml` 的生产运行只安装锁定的运行时依赖，并缓存已固定 SHA-256 的 Mihomo 压缩包；缓存命中后仍重新校验摘要再解压。
+仓库不锁依赖版本：没有 `package-lock.json` / `uv.lock`（两者都在 `.gitignore` 里），npm 与 Python 依赖每次按 `package.json` / `pyproject.toml` 解析最新，`wrangler` 写成 `latest`。`scan.yml` 的运行时依赖按天刷新，Mihomo 每次取最新 release 并按 GitHub 资产摘要校验。上游发布不兼容的新版本时扫描或 CI 可能直接失败，届时再临时指定版本。
 
 真实订阅不会写入仓库，运行前通过环境变量注入，并走生产同一套脚本。
 

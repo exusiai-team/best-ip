@@ -71,7 +71,7 @@ class NodeRunner:
         """检测一个节点：先试一次；失败且值得重试时，余下的尝试**并行**跑，谁先成功用谁。
 
         为什么并行：永久连不上的节点每次尝试都要吃满 Mihomo 的 5 秒拨号超时，三次串行加退避约
-        18 秒，整轮扫描的长尾就是这几个节点（见 2026-09-21 墙钟预算笔记的「节点侧成本构成」）。
+        18 秒，整轮扫描的长尾就是这几个节点（见 docs/DECISIONS.md「扫描核心」）。
         第 2、3 次尝试本来就各用各的 DNS 引导出口、各起一个 Mihomo，彼此不依赖；并行之后
         这条长尾约 11 秒。判定口径不变：最多 max_node_attempts 次、取第一份非失败记录、
         全部失败时用编号最大的那次失败作终态。
@@ -316,7 +316,7 @@ def _dns_bootstrap_candidates(proxies: list[dict[str, Any]]) -> list[str]:
     IPv6 字面量节点只有在运行环境有 IPv6 出口时才可能连上；一旦被选中而连不上，
     这次尝试的 DNS 就全部失败，日志被读成「节点服务器域名无法解析」，
     于是一个 A 记录正常、本来能连的节点被判成失败并白烧三次尝试。
-    见 implemented/bug-fix/2026-09-23-dns-bootstrap-ipv6-poisoning.md。
+    见 docs/DECISIONS.md「扫描核心」。
     """
     candidates: list[str] = []
     for proxy in proxies:

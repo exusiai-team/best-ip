@@ -90,7 +90,7 @@ export function normalizePrivateKey(pem) {
 }
 
 export async function installationToken(env, forceRefresh = false) {
-  const installationId = String(env.GITHUB_APP_INSTALLATION_ID || env.GITHUB_INSTALLATION_ID || "").trim();
+  const installationId = String(env.GITHUB_APP_INSTALLATION_ID || "").trim();
   if (!INSTALLATION_ID_PATTERN.test(installationId)) {
     throw new HttpError(503, "GitHub App installation 尚未配置", "worker_not_configured");
   }

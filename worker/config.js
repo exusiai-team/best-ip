@@ -33,7 +33,7 @@ export function assertWorkerConfigured(env) {
     !KEY_ID_PATTERN.test(String(env.SCAN_KEY_ID || "").trim()) ||
     !String(env.SCAN_TOKEN_SECRET || "").trim() ||
     !APP_ID_PATTERN.test(String(env.GITHUB_APP_ID || "").trim()) ||
-    !INSTALLATION_ID_PATTERN.test(String(env.GITHUB_APP_INSTALLATION_ID || env.GITHUB_INSTALLATION_ID || "").trim()) ||
+    !INSTALLATION_ID_PATTERN.test(String(env.GITHUB_APP_INSTALLATION_ID || "").trim()) ||
     !String(env.GITHUB_APP_PRIVATE_KEY || "").trim()
   ) {
     throw new HttpError(503, "Worker 扫描 secrets 尚未完整配置", "worker_not_configured");

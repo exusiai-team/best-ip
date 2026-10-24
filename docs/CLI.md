@@ -75,7 +75,13 @@ egress that actually answered — `subscription_source: direct` or
 when the relay answered after the direct attempt failed. With neither variable set the
 run is direct-only, and setting only one of the pair is a configuration error
 (`environment_not_ready`). A failing download prints `subscription_fallback_reason`
-before `subscription_fetch_reason` when the direct attempt had already failed. Relay
+before `subscription_fetch_reason` when the direct attempt had already failed. Once the
+scan job settles (completed or not) the CLI prints one aggregate
+`scan_timing: subscription=… scan_wall=… nodes=… peak_parallel=… node_p50=… node_p90=…
+node_max=… retried=… failed=… phase_sum[…]` line to stderr: numbers only, no node names,
+exit IPs or subscription content. Node times include discarded failed attempts;
+`phase_sum` adds each phase across nodes, so under parallelism it exceeds the wall clock
+and is read as proportions. Relay
 failures report the fixed codes
 `relay_url_invalid`, `relay_token_invalid`, `relay_unauthorized`,
 `relay_response_too_large`, `relay_unreachable`, `relay_not_configured`,

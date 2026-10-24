@@ -159,17 +159,3 @@ export function assertSameOrigin(request) {
   }
 }
 
-// Some privacy-focused browsers omit Fetch Metadata or report it incorrectly
-// for a top-level form. Trust an explicit same-origin Origin, while rejecting
-// an explicit cross-origin Origin and cross-site requests without one.
-export function assertLoginOrigin(request) {
-  const expected = new URL(request.url).origin;
-  const origin = request.headers.get("Origin");
-  if (origin && origin !== expected) {
-    throw new HttpError(403, "拒绝跨站状态变更请求", "csrf_rejected");
-  }
-  const fetchSite = request.headers.get("Sec-Fetch-Site");
-  if (!origin && fetchSite && !["same-origin", "same-site", "none"].includes(fetchSite)) {
-    throw new HttpError(403, "拒绝跨站状态变更请求", "csrf_rejected");
-  }
-}

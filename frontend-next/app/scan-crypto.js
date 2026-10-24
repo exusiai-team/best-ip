@@ -1,13 +1,7 @@
 /* ============================================================================
-   订阅地址的信封加密 —— frontend/src/crypto.js 的逐字副本
+   订阅地址的信封加密
    ----------------------------------------------------------------------------
-   为什么是副本而不是共享模块：两个前端都是「不打包、直接由 assets 目录提供」的静态站点，
-   assets.directory 只能指向一个目录（现在是 ./frontend-next），跨出该目录的相对 import
-   在生产里就是 404。所以只能复制；这也是这段代码唯一合理的重复理由。
-
-   两边必须同时改：改动 frontend/src/crypto.js 时把这份一起同步过来。
-   `diff frontend/src/crypto.js frontend-next/app/scan-crypto.js` 除本段注释外应无差异。
-   等旧前端下线（assets 切换完成、frontend/ 删除）这里的副本才重新变成唯一实现。
+   原是旧前端 frontend/src/crypto.js 的逐字副本；旧前端已删除，这里是唯一实现。
 
    它做的事：用 ./scan-public.pem 里的 RSA-3072 公钥 + 一把一次性 AES-256-GCM 密钥，
    把订阅地址封装成 worker/scans.js 的 validateEnvelope 能认的信封。明文订阅地址

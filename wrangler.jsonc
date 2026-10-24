@@ -4,8 +4,6 @@
   "main": "worker/index.js",
   "compatibility_date": "2026-08-23",
   "workers_dev": true,
-  // 线上页面 = 新前端：assets 根指向 frontend-next。旧 frontend/ 仍留在仓库里但不再被提供；
-  // 回退只需把下面这一行改回 "./frontend"（scripts/verify_deploy.mjs 会跟着这一行换比对基准）。
   "assets": {
     "directory": "./frontend-next",
     "binding": "ASSETS",
@@ -17,5 +15,8 @@
   "durable_objects": {
     "bindings": [{ "name": "SCAN_PROGRESS", "class_name": "ScanProgress" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ScanProgress"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ScanProgress"] }],
+  // Workers Builds 给非生产分支跑 `wrangler preview`，新版 wrangler 要求有这个块。
+  // 预览不继承顶层的绑定与密钥：预览站点只证明「能构建、能上传」，打开会提示 Worker 未配置。
+  "previews": {}
 }

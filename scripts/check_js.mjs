@@ -17,6 +17,5 @@ async function checkDirectory(directory) {
   }
 }
 
-// frontend-next 是新前端的静态设计示例，和 frontend 一样是「不经过打包器直接上线」的
-// 源码目录，因此同样逐个文件过 node --check，别让示例里混进语法错误。
-for (const directory of ["frontend", "frontend-next", "worker", "scripts"]) await checkDirectory(directory);
+// frontend-next 是「不经过打包器直接上线」的源码目录，所以逐个文件过 node --check。
+for (const directory of ["frontend-next", "worker", "scripts"]) await checkDirectory(directory);
