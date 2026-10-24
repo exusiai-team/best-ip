@@ -6,8 +6,8 @@
    所以这里做三件事，一件都不多：
      1. GET /api/scans/latest —— 问 Worker「最近一次扫描是哪一次、产物在不在」；
      2. 拿它给的签名地址直连 blob 取回 ZIP 字节（Worker 不搬字节，见
-        implemented/architecture/2026-09-21-artifact-bytes-delegated-to-browser.md）；
-     3. 交给 app/artifact/reader.js 逐个字节校验（身份、SHA-256、CRC、manifest 交叉核对），
+        docs/DECISIONS.md「结果与校验」）；
+     3. 交给 app/artifact/reader.js 做完整性校验（身份、SHA-256、CRC、manifest 交叉核对），
         再把 result.json 原样返回——它的形状和本机 loopback 的 ?job= 导出完全一样，
         于是 records.js / render.js 一行都不用改。
 

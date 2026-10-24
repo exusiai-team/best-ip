@@ -12,7 +12,7 @@
       中性灰的「未知」。把 null 压成 false，等于把一个没测出归属的节点当面诬告成机房。
 
    2. ipure_scores 里的 -1 是「该地区受限」的哨兵，**不是低分**：原样保留，交给取色与
-      排序逻辑按哨兵处理（见 implemented/architecture/2026-09-21-ipure-restricted-sentinel-and-score-band.md）。
+      排序逻辑按哨兵处理（见 docs/DECISIONS.md「数据与评分」）。
       null 才是「该项无数据」。两者混起来会把受限地区画成红色垫底。
 
    3. 一切非字符串脏值都截断成 null：空串、数字、对象都当没有。渲染器对「有值」和
