@@ -42,7 +42,7 @@
 
 ## 发布与流程
 
-- **发布只走 Cloudflare Workers Builds**（OAuth 连仓库）：`main` 上执行 `npm run deploy`。`deploy_guard.mjs` 只拦本机发起的发布；全仓 LF 由 `.gitattributes` 保证。Workers Builds 不等 GitHub CI，合并前要看 CI 是否通过。
+- **发布只走 Cloudflare Workers Builds**（OAuth 连仓库）：`main` 上执行 `npx wrangler@latest deploy`（不锁 wrangler 版本，所有者选择自动跟进最新）。`npm run deploy` 经 `deploy_guard.mjs` 只用来拦本机发起的发布；全仓 LF 由 `.gitattributes` 保证。Workers Builds 不等 GitHub CI，合并前要看 CI 是否通过。
 - **CI**：`push` 只看 `main`，PR 由 `pull_request` 覆盖；跑 Ruff、pytest、`npm run check`、`wrangler deploy --dry-run`。
 - **测试用替身，不联网**：替身 Mihomo 与采集器覆盖重试、并行与清理，加上 CLI 端到端和产物跨语言读回。真实订阅的实测走手动派发的 `verify-scan.yml`。（2026-09-21 曾决定不维护测试；2026-10-24 按所有者要求恢复。）
 - **Actions 固定 `ubuntu-24.04` 与 node24 版本的 action**。

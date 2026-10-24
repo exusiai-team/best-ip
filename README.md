@@ -65,13 +65,14 @@ npm run dev:no-reload
 
 发布走 Cloudflare Workers Builds（Worker 在控制台用 OAuth 连接本仓库），本地 `npm run deploy` 会被 `scripts/deploy_guard.mjs` 直接拒绝（退出码 2）。发布路径：
 
-1. **自动**：push（或合并 PR）到 `main` → Workers Builds 检出该 commit，执行部署命令 `npm run deploy`。
+1. **自动**：push（或合并 PR）到 `main` → Workers Builds 检出该 commit，执行部署命令 `npx wrangler@latest deploy`。
 2. **手动重发一次**：在 Cloudflare 控制台该 Worker 的 Deployments / Builds 里对 `main` 重新构建。
 
 Workers Builds 的构建设置（Settings → Build）：
 
-- 生产分支：`main`；构建命令：`npm ci`；部署命令：**`npm run deploy`**。不要用默认的 `npx wrangler deploy`，那样会绕过下面的守卫。
-- 非生产分支：用默认的预览命令（只出预览版本，不上线），或直接关掉非生产分支构建。不要设成 `npm run deploy`，守卫会以退出码 3 拒绝。
+- 生产分支：`main`；构建命令：留空；部署命令：`npx wrangler@latest deploy`（不装依赖、不锁版本，每次用最新的 wrangler）。
+- 非生产分支：用默认的预览命令（只出预览版本，不上线），或直接关掉非生产分支构建。
+- `npm run deploy` 只是本地的拦截：它先跑 `scripts/deploy_guard.mjs`，不在 Workers Builds 里就以退出码 2 拒绝，防止从本机直接发布。
 - Build variables 一个都不需要；运行时密钥只放 Worker 的 Variables and Secrets（见下文「平台配置」），`wrangler deploy` 不会覆盖它们。
 
 注意：Workers Builds 不等 GitHub 上的 `CI` 工作流结果，push 到 `main` 就会构建。所以合并前要看 PR 上的 CI 是绿的；也可以在 GitHub 的分支保护里把 `CI / test` 设成必过检查。

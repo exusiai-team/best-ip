@@ -20,10 +20,9 @@ materialize the same records. The documentation IP is deliberately non-productio
   The workflow decrypts with `scripts/decrypt_subscription.mjs`, then runs
   `scripts/run_scan.py` directly against the shared scan core. No HTTP server or
   acceptance script runs in production. See [CLI.md](CLI.md) for arguments and exits.
-- `npm run dry-run` checks bundling read-only. `npm run deploy` is the Cloudflare
-  Workers Builds deploy command and refuses to run outside it (`scripts/deploy_guard.mjs`
-  requires `WORKERS_CI=1` and branch `main`; exits 2 locally); releases only come from
-  Workers Builds on `main`. `.gitattributes` pins every text file to LF.
+- `npm run dry-run` checks bundling read-only. Releases only come from Cloudflare
+  Workers Builds on `main` (`npx wrangler@latest deploy`, no install step). `npm run deploy`
+  is a local tripwire: `scripts/deploy_guard.mjs` exits 2 outside Workers Builds. `.gitattributes` pins every text file to LF.
   Neither unit tests nor dry-run prove real Mihomo or Actions execution.
 
 ## Local HTTP
