@@ -212,19 +212,23 @@ export async function scanState(request, env, requestId) {
       { "Cache-Control": "no-store" },
     );
   }
-  // 三路读数互不依赖，并行取：轮询每一轮都走这里，串行只会把页面上的进度一轮轮拖慢。
-  // job 明细与进度读数都只是「过程中的说明」，各自失败只降级；产物探测失败照旧整轮报错。
+  // 进度读数（Durable Object，几十毫秒）与产物探测并行取；产物探测失败照旧整轮报错。
+  // job 明细只在「运行中但读不到 runner 进度」时才去 GitHub 取：页面只拿它的步骤名兜底推断阶段
+  // （frontend-next/app/progress.js 的 stageOf），有进度读数时步骤名永远排在后面，没运行时也用不上。
+  // 原来每轮都取，是每次轮询里最慢的一路 GitHub 请求。
   const succeeded = run.status === "completed" && run.conclusion === "success";
-  const [jobsResult, progress, artifact] = await Promise.all([
-    listRunJobs(env, run).catch((error) => ({
+  const [progress, artifact] = await Promise.all([
+    readScanProgress(env, requestId, run),
+    succeeded ? findArtifact(env, run, requestId) : null,
+  ]);
+  const jobsResult = run.status === "in_progress" && !progress
+    ? await listRunJobs(env, run).catch((error) => ({
       available: false,
       jobs: [],
       totalCount: null,
       warning: error instanceof HttpError ? error.message : "读取 Actions job 失败",
-    })),
-    readScanProgress(env, requestId, run),
-    succeeded ? findArtifact(env, run, requestId) : null,
-  ]);
+    }))
+    : { available: true, jobs: [], totalCount: null, warning: null };
   const status = run.status === "completed" && run.conclusion === "success" && !artifact
     ? "artifact_pending"
     : runStatus(run);

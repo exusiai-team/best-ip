@@ -68,11 +68,6 @@ export function ipureScoreChannels(score, theme = DEFAULT_THEME) {
   return null;
 }
 
-export function ipureScoreColor(score, theme = DEFAULT_THEME) {
-  const channels = ipureScoreChannels(score, theme);
-  return channels ? `rgb(${channels.join(" ")})` : null;
-}
-
 // 只写入两组通道（--sc-l / --sc-d），不写具体颜色：选哪一套、前景/描边/底色各占多少
 // 由 styles.css 决定。内联样式拿不到当前主题（深色靠 prefers-color-scheme，切换不会重渲染），
 // 所以主题分发必须留在 CSS 里。

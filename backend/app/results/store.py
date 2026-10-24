@@ -76,9 +76,6 @@ class ResultStore:
         self._atomic_write(self._job_dir(job_id) / "manifest.json", manifest)
         return manifest
 
-    def read_progress(self, job_id: str) -> dict[str, Any]:
-        return self._read_json(self._job_dir(job_id) / "progress.json")
-
     def read_manifest(self, job_id: str) -> dict[str, Any]:
         manifest = self._read_json(self._job_dir(job_id) / "manifest.json")
         self._validate_manifest(job_id, manifest)
