@@ -1,9 +1,9 @@
 import { HttpError } from "./responses.js";
 
 export const GITHUB_API = "https://api.github.com";
-// 仓库已从个人账号 silverwolf-x 转到组织 silverwolfxai。GitHub 对旧路径只回转址（3xx），而 githubJson
+// 仓库已从 silverwolfxai 转到组织 exusiai-team。GitHub 对旧路径只回转址（3xx），而 githubJson
 // 用的是 redirect: "manual"（只认确切的那个仓库），所以这里必须写当前的所有者，不能靠转址兜底。
-export const GITHUB_OWNER = "silverwolfxai";
+export const GITHUB_OWNER = "exusiai-team";
 export const GITHUB_REPOSITORY = "best-ip";
 export const GITHUB_WORKFLOW = "scan.yml";
 export const GITHUB_WORKFLOW_PATH = ".github/workflows/scan.yml";

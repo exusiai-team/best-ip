@@ -47,7 +47,7 @@ Mihomo 默认安装最新 release，并用 GitHub 给出的资产摘要（`diges
 
 - 输入必须是顶部含 `proxies` 的 UTF-8 Mihomo/Clash YAML 公开 HTTP/HTTPS 地址。
 - 浏览器使用 AES-256-GCM 加密订阅 URL，再用 `frontend-next/scan-public.pem` 对应的 RSA-OAEP-3072 公钥包裹 AES key；明文 URL 不进入 Worker API、GitHub workflow input 或 artifact。
-- Worker 固定调度 `silverwolfxai/best-ip` 的 `main` 分支和 `scan.yml`，不提供通用 GitHub API 代理。
+- Worker 固定调度 `exusiai-team/best-ip` 的 `main` 分支和 `scan.yml`，不提供通用 GitHub API 代理。
 - 每个节点尝试使用独立 Mihomo 进程、端口、连接池和临时目录；默认最多 `min(16, max(8, CPU 核数))` 个节点并发（上限为订阅节点数），每节点最多 3 次尝试：首次失败后余下的尝试**并行**跑，第一份非失败记录胜出、其余立即取消并确认清理（永久连不上的节点从约 18 秒降到约 11 秒）。
 - 出口 IP、国家和地区、服务商 / ISP、ASN、接入（住宅 / 移动 / 商业 / 机房 / 教育 / 政府）与原生性以 IPure `/api/lookup` 报告为准（`geo.countryName/country/region/city`、`asn.asn/org/name`、`usageType`、`nativeType`）：报告里说了的那一组就用它，没说的那一组才回落到 Coffee 的归属查询；每组来源记在节点记录的 `network_source`，页面在对应单元格的 title 里标出「来源：IPure / Coffee」。出口 IP 仍由 trace 发现（IPure 查询必须带上一个 IP），IPure 回显一致时记为由 IPure 确认。
 - Coffee 页面与 trace 并行；确认出口 IP 后，lookup、global ping、portscan、pingcheck、related、IPure 官方 `/api/lookup` 评分及 ChatGPT/Codex 探测按既定依赖并发执行。IPure 没有返回纯净度总分时，节点会如实标记为“部分”。
@@ -99,7 +99,7 @@ Worker 使用 Static Assets 托管 `frontend-next/`；当前配置不使用 Clou
 
 ## 平台配置
 
-1. 创建 GitHub App，只授予当前仓库 `Actions: Read and write` 与 `Metadata: Read`，并只安装到 `silverwolfxai/best-ip`（仓库所有者变了就要在新所有者下重新安装，并更新 `GITHUB_APP_INSTALLATION_ID`）。
+1. 创建 GitHub App，只授予当前仓库 `Actions: Read and write` 与 `Metadata: Read`，并只安装到 `exusiai-team/best-ip`（仓库所有者变了就要在新所有者下重新安装，并更新 `GITHUB_APP_INSTALLATION_ID`）。
 2. 在 Worker 的 Settings → Variables and Secrets 添加 Secret `SITE_PASSWORD`：使用密码管理器生成至少 16 个字符的随机密码（最多 1024 字符）。无需 Cloudflare Access；如果之前启用了 Worker 域名的 Access 保护，请关闭该保护，并移除覆盖该域名的 Zero Trust Access Application。原来的三个 `ACCESS_*` 变量可以删除。
 3. 配置 Worker secrets/variables：
 
@@ -111,7 +111,7 @@ Worker 使用 Static Assets 托管 `frontend-next/`；当前配置不使用 Clou
    - `SITE_PASSWORD`
    - `SUBSCRIPTION_RELAY_TOKEN`：runner 回调 Worker（订阅中继与 `/api/scan-progress`）的令牌，至少 16 个字符，必须与 Actions secret `SCAN_RELAY_TOKEN` 相同。
 
-4. 配置 Actions secrets `SCAN_PRIVATE_KEY_PEM`、`SCAN_RELAY_TOKEN`、`IPURE_CONFIG_YAML`，并配置 Actions variables `SCAN_KEY_ID`、`SCAN_RELAY_URL`（Worker 的 https 地址）。`IPURE_CONFIG_YAML` 保存与本地 `config/ipure.yml` 相同的请求头覆盖内容，`scan.yml` 要求它非空且带 IPure 验证 cookie，缺失时扫描在准备阶段失败；Actions 扫描前生成该文件，结束时清理，不上传到结果 artifact。Worker 仅调度扫描，不查询 IPure，也不向前端提供任何第三方请求头。可用 `gh secret set IPURE_CONFIG_YAML --repo silverwolfxai/best-ip < config/ipure.yml` 同步本地配置到云端；修改本地文件不会自动更新 GitHub Secret。
+4. 配置 Actions secrets `SCAN_PRIVATE_KEY_PEM`、`SCAN_RELAY_TOKEN`、`IPURE_CONFIG_YAML`，并配置 Actions variables `SCAN_KEY_ID`、`SCAN_RELAY_URL`（Worker 的 https 地址）。`IPURE_CONFIG_YAML` 保存与本地 `config/ipure.yml` 相同的请求头覆盖内容，`scan.yml` 要求它非空且带 IPure 验证 cookie，缺失时扫描在准备阶段失败；Actions 扫描前生成该文件，结束时清理，不上传到结果 artifact。Worker 仅调度扫描，不查询 IPure，也不向前端提供任何第三方请求头。可用 `gh secret set IPURE_CONFIG_YAML --repo exusiai-team/best-ip < config/ipure.yml` 同步本地配置到云端；修改本地文件不会自动更新 GitHub Secret。
 
 打开网站后输入访问密码。登录会话有效期 12 小时，保存在 Secure、HttpOnly、SameSite=Strict 的主机专属 Cookie 中；页面提供退出登录入口。修改 `SITE_PASSWORD` 或 `SCAN_TOKEN_SECRET` 后旧会话失效。退出登录清除当前浏览器 Cookie，其他浏览器的会话不受影响。密码和签名密钥只放 Worker 运行时 Secrets，不放 Build variables 或仓库。
 

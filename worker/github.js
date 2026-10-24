@@ -152,7 +152,7 @@ export async function githubJson(env, path, options = {}, retry = true) {
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
     const status = response.status === 403 ? 502 : response.status === 404 ? 404 : 502;
-    throw new GitHubError(status, status === 404 ? "GitHub 资源不存在" : "GitHub API 请求失败");
+    throw new GitHubError(status, status === 404 ? "GitHub 资源不存在" : `GitHub API 请求失败（HTTP ${response.status}）`);
   }
   return payload;
 }

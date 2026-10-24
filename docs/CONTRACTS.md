@@ -16,7 +16,7 @@ materialize the same records. The documentation IP is deliberately non-productio
   GET/POST/DELETE, headers Accept/Content-Type, and no credentials.
   Windows launcher disables reload; health checks file existence, not process creation.
 - Production: Worker Static Assets + password session -> GitHub App -> fixed
-  `silverwolfxai/best-ip`, `main`, `.github/workflows/scan.yml`.
+  `exusiai-team/best-ip`, `main`, `.github/workflows/scan.yml`.
   The workflow decrypts with `scripts/decrypt_subscription.mjs`, then runs
   `scripts/run_scan.py` directly against the shared scan core. No HTTP server or
   acceptance script runs in production. See [CLI.md](CLI.md) for arguments and exits.
