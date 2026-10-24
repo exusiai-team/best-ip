@@ -2,8 +2,9 @@
    扫描触发通路 —— 在页面上发起一次真实扫描，并把它盯到出结果
    ----------------------------------------------------------------------------
    整条链路都在同源底下，所以生产 CSP 一个字都不用放宽：
-     1. 用 ./scan-public.pem 的公钥把订阅地址封装成信封（app/scan-crypto.js），
-        POST /api/scans 交给 Worker —— 明文订阅地址从不离开浏览器；
+     1. POST /api/scans 把订阅地址交给本站 Worker（同源 HTTPS）。Worker 只把它暂存在自己的
+        Durable Object 里，不放进 GitHub 的 workflow 输入；runner 凭 GitHub Actions OIDC 领一次
+        就删（worker/runner.js）；
      2. Worker 用 GitHub App token 触发 scan.yml（worker/scans.js 的 createScan），
         回 202 { request_id, scan_token, dispatched_at }；token 走 X-Best-IP-Scan-Token
         头，只存在内存里；
@@ -23,19 +24,15 @@
    停止」。这些都是「不再刷这条请求」，不是「任务已被停掉」。
    ========================================================================== */
 
-import { encryptSubscriptionUrl, requestId } from "./scan-crypto.js";
 import { readArtifactFrom, artifactUrlOf } from "./gateway.js";
 import { failure, gatewayStatusText } from "./failure.js";
-import { fetchWithTimeout, isTimeoutError, timeoutPair } from "./net.js";
+import { isTimeoutError, timeoutPair } from "./net.js";
 import { normalizeProgress, stageOf, STAGE_TEXT } from "./progress.js";
 
 const SCANS_PATH = "/api/scans";
 const TOKEN_HEADER = "X-Best-IP-Scan-Token";
 const START_TIMEOUT_MS = 30_000;
 const POLL_TIMEOUT_MS = 30_000;
-// 取加密公钥打的是本站同源的一份 ~1KB PEM，与别的请求同量级；它比别处更该有上限——挂住时
-// 页面停在「正在加密订阅地址并交给扫描网关…」，连一个可以点的按钮都没有。
-const PUBLIC_KEY_TIMEOUT_MS = 15_000;
 const QUEUE_DEADLINE_MS = 13 * 60_000;
 const RUN_DEADLINE_MS = 31 * 60_000;
 const CANCEL_DEADLINE_MS = 2 * 60_000;
@@ -57,8 +54,8 @@ export const SCAN_PROGRESS_POLL_MS = 1_000;
 
 /**
  * 提交前的快检查（文案沿用旧前端的 validateSubscriptionUrl）。
- * 这不是多余的一份：加密模块内部也会校验，但那一步已经生成了 AES 密钥、可能还取了公钥，
- * 而地址最常见的手误（漏了 https:// 、粘成了带账号密码的内网地址）不值得先清空表格再报错。
+ * 这不是多余的一份：Worker 也会校验，但地址最常见的手误（漏了 https:// 、粘成了带账号密码的
+ * 内网地址）不值得先清空表格、发一趟请求再报错。
  */
 export function validateSubscriptionUrl(value) {
   let url;
@@ -73,19 +70,17 @@ export function validateSubscriptionUrl(value) {
   return url.toString();
 }
 
-/**
- * 给 scan-crypto.js 注入的 fetchImpl 套上超时。
- * 那条取公钥的请求（importPublicKey 里的 fetchImpl(url, { cache: "no-store" })）原本没有超时，
- * 挂住的话页面会永久停在「正在加密订阅地址并交给扫描网关…」。超时放在注入点，
- * 让 scan-crypto.js 只管加密、不管网络策略。
- */
-function withPublicKeyTimeout(fetchImpl) {
-  return (input, init) => fetchWithTimeout(fetchImpl, input, init, PUBLIC_KEY_TIMEOUT_MS);
+/** 浏览器生成的关联 ID：同时是 workflow 的 run-name 与 Worker 侧暂存状态的键。 */
+export function requestId() {
+  if (globalThis.crypto?.randomUUID) return `req-${globalThis.crypto.randomUUID()}`;
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return `req-${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
 /**
  * 一次同源 JSON 请求。非 2xx 时优先用 Worker 自己给的那句话（worker/responses.js 的形状是
- * { error, detail }）——「扫描公钥指纹不匹配」比一句通用的「请求失败」有用得多。
+ * { error, detail }）——「订阅地址必须是公开的 http/https 链接」比一句通用的「请求失败」有用得多。
  */
 async function requestJson(fetchImpl, path, { method = "GET", body = null, token = "", timeout = POLL_TIMEOUT_MS } = {}) {
   const headers = { Accept: "application/json" };
@@ -147,7 +142,7 @@ async function requestJson(fetchImpl, path, { method = "GET", body = null, token
 function httpMessage(status) {
   if (status === 404) return "本站不认识这个扫描任务（404）。";
   if (status === 409) return "这次扫描的状态与请求对不上（409）。";
-  if (status === 413) return "加密后的订阅地址超过本站上限（413）。";
+  if (status === 413) return "订阅地址超过本站上限（413）。";
   if (status === 429) return "本站正在限流（429）：稍等一会儿再发起扫描。";
   return gatewayStatusText(status, {
     sessionTail: "后再发起扫描",
@@ -247,29 +242,12 @@ function assertWithinDeadline(session, now) {
  * 发起一次扫描。
  * @returns {Promise<object>} 只存在内存里的会话：后续 pollScan / cancelScan 都靠它。
  */
-export async function startScan(subscriptionUrl, config, { fetchImpl = globalThis.fetch, baseURI = globalThis.document?.baseURI, now = Date.now } = {}) {
+export async function startScan(subscriptionUrl, { fetchImpl = globalThis.fetch, now = Date.now } = {}) {
   if (typeof fetchImpl !== "function") throw failure("no_fetch", "当前环境没有可用的 fetch");
   const id = requestId();
-  // 公钥指纹在这一步被核对（importPublicKey 拿 PEM 的 DER SHA-256 比 config.keyId）：
-  // 与 Worker 的 SCAN_KEY_ID 不是同一把时当场失败，不发出一个必然被 400 拒掉的请求。
-  // 公钥指纹在这一步被核对（importPublicKey 拿 PEM 的 DER SHA-256 比 config.keyId）：
-  // 与 Worker 的 SCAN_KEY_ID 不是同一把时当场失败，不发出一个必然被 400 拒掉的请求。
-  // 只有这一步需要单独收口：scan-crypto.js 自己只会为「没配 / 格式无效 / 指纹不符」给文案，
-  // 它那条取公钥的请求没有超时，超时错误得在这里翻译成一句能看懂的话。
-  let envelope;
-  try {
-    envelope = await encryptSubscriptionUrl(subscriptionUrl, id, config, {
-      fetchImpl: withPublicKeyTimeout(fetchImpl),
-      baseURI,
-    });
-  } catch (cause) {
-    if (!isTimeoutError(cause)) throw cause;
-    throw failure("public_key_timeout",
-      `GitHub Actions 加密公钥 ${PUBLIC_KEY_TIMEOUT_MS / 1000} 秒内没有返回`, { retryable: true });
-  }
   const payload = await requestJson(fetchImpl, SCANS_PATH, {
     method: "POST",
-    body: { request_id: id, key_id: String(config.keyId), envelope },
+    body: { request_id: id, subscription_url: validateSubscriptionUrl(subscriptionUrl) },
     timeout: START_TIMEOUT_MS,
   });
   if (!payload || typeof payload !== "object" || payload.request_id !== id

@@ -34,11 +34,11 @@
       </div>
 
       <!-- 发起扫描：只在在线部署里出现（site-config.js 说 mode === "gateway"）。它默认 hidden，
-           由 app/main.js 在确认「本站确实有扫描网关、而且扫描公钥配好了」之后才显出来——
+           由 app/main.js 在确认「本站确实有扫描网关」之后才显出来——
            静态示例与本机 ?job= 路径下摆一个点了必然失败的按钮，比不摆更糟。
            订阅地址是 type="text" 的明文输入（用户要求：不要隐私掩码，直接公开输入）。链接本身
-           带 token，所以页面不回显、不落盘、不进导出快照；明文也从不离开浏览器，加密在提交前
-           就完成了（app/scan-crypto.js）。图标相应地从挂锁换成链接符号，免得界面暗示有遮掩。 -->
+           带 token，所以页面不回显、不落盘、不进导出快照；它只交给本站 Worker 暂存，不进 GitHub 的
+           workflow 输入（worker/runner.js）。图标用链接符号而不是挂锁，免得界面暗示有遮掩。 -->
       <form class="scanbar" id="scanForm" hidden>
         <div class="scan-row">
           <label class="sr-only" for="subscriptionUrl">Mihomo YAML 订阅链接</label>

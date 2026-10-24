@@ -1,6 +1,6 @@
 import { HttpError, json } from "./responses.js";
 import { REQUEST_ID_PATTERN, isRecord, positiveInteger } from "./config.js";
-import { assertRelayConfigured, assertRelayToken } from "./relay.js";
+import { assertRunnerToken, scanStub } from "./runner.js";
 
 // 扫描进行中的实时进度：runner 大约每秒把「每个节点此刻在做什么」和总计数报给 Worker，页面轮询时
 // 由 Worker 交回。为什么要这条通道：GitHub 在 job 结束前读不到日志（实测 404），Actions API 只给得出
@@ -24,6 +24,8 @@ const MAX_NODE_MS = 3_600_000;
 // 一条进度只在扫描期间有意义：scan.yml 是 timeout-minutes: 30，artifact 只留 1 天。
 // 6 小时后整条清掉，存储里不留历史。
 const RETENTION_MS = 6 * 60 * 60 * 1000;
+// 暂存的订阅地址只等 runner 来领这么久（workflow 排队通常几秒，长的也就一两分钟）。
+const SUBSCRIPTION_TTL_MS = 15 * 60 * 1000;
 const READ_TIMEOUT_MS = 3_000;
 // 阶段只往前走：同一次运行里晚到的旧报告不能把「打包中」打回「扫描中」。
 const PHASES = ["subscription", "scanning", "packaging", "done"];
@@ -118,21 +120,18 @@ async function readReport(request) {
   }
 }
 
-function progressStub(env, requestId) {
-  const namespace = env.SCAN_PROGRESS;
-  if (!namespace?.idFromName || !namespace?.get) return null;
-  return namespace.get(namespace.idFromName(requestId));
-}
-
-/** POST /api/scan-progress：runner → Worker。与订阅中继同一把 runner 凭证，不经过站点密码门。 */
+/** POST /api/scan-progress：runner → Worker。凭领取订阅时拿到的 runner 令牌，不经过站点密码门。 */
 export async function scanProgressReport(request, env) {
   try {
     if (request.method !== "POST") throw new HttpError(405, "请求方法不支持", "method_not_allowed");
-    assertRelayToken(request, assertRelayConfigured(env));
+    const runner = await assertRunnerToken(request, env);
     const report = normalizeReport(await readReport(request));
-    const stub = progressStub(env, report.request_id);
-    if (!stub) throw new HttpError(503, "扫描进度存储尚未绑定", "worker_not_configured");
-    const stored = await stub.fetch("https://scan-progress/report", {
+    // 令牌只对领取它的那一次运行有效：不能拿它替别的 request_id 或别的 attempt 写进度。
+    if (report.request_id !== runner.request_id || report.run_id !== runner.run_id ||
+        report.run_attempt !== runner.run_attempt) {
+      throw new HttpError(403, "进度报告与 runner 身份不符", "run_identity_mismatch");
+    }
+    const stored = await scanStub(env, report.request_id).fetch("https://scan-state/report", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(report),
@@ -156,12 +155,12 @@ export async function readScanProgress(env, requestId, run, { withNodes = false 
   const runId = positiveInteger(run?.id);
   const runAttempt = positiveInteger(run?.run_attempt);
   if (!runId || !runAttempt || !REQUEST_ID_PATTERN.test(String(requestId || ""))) return null;
-  const stub = progressStub(env, requestId);
+  const stub = scanStub(env, requestId);
   if (!stub) return null;
   let timer;
   try {
     const response = await Promise.race([
-      stub.fetch("https://scan-progress/report", { method: "GET" }),
+      stub.fetch("https://scan-state/report", { method: "GET" }),
       new Promise((resolve) => { timer = setTimeout(() => resolve(null), READ_TIMEOUT_MS); }),
     ]);
     if (!response?.ok) return null;
@@ -211,9 +210,12 @@ function isStale(stored, incoming) {
 }
 
 /**
- * 每个 request_id 一个实例，只存一条最新报告（含逐节点读数，最大约 150KB，远低于 SQLite 后端
- * 单值 2MB 的上限）。存储是 Worker 已经校验过的规整对象，
- * 这里不再信任调用方之外的任何输入（只有本 Worker 能拿到这个 namespace）。
+ * 每个 request_id 一个实例，存这次扫描在 Worker 侧的全部状态：
+ * - `subscription`：页面交来、等 runner 领取的订阅地址（15 分钟过期，领取即删）；
+ * - `runner`：领取时绑定的运行身份与 runner 令牌的 SHA-256（令牌本身不落盘）；
+ * - `report`：最新一条进度报告（含逐节点读数，最大约 150KB，远低于 SQLite 后端单值 2MB 的上限）。
+ * 存储里都是 Worker 已经校验过的规整对象（只有本 Worker 能拿到这个 namespace）。
+ * 第一次写入起 6 小时整体清空；订阅地址到期由同一个 alarm 提前删掉。
  */
 export class ScanProgress {
   constructor(state) {
@@ -221,6 +223,13 @@ export class ScanProgress {
   }
 
   async fetch(request) {
+    const path = new URL(request.url).pathname;
+    if (path === "/subscription") return this.subscription(request);
+    if (path === "/claim" && request.method === "POST") return this.claim(request);
+    if (path === "/runner" && request.method === "GET") {
+      return Response.json((await this.state.storage.get("runner")) ?? null);
+    }
+    if (path !== "/report") return new Response(null, { status: 404 });
     if (request.method === "GET") {
       const stored = await this.state.storage.get("report");
       return Response.json(stored ?? null);
@@ -236,13 +245,67 @@ export class ScanProgress {
     if (!isStale(stored, incoming)) {
       await this.state.storage.put("report", { ...incoming, updated_at: new Date().toISOString() });
     }
-    if (!(await this.state.storage.getAlarm())) {
-      await this.state.storage.setAlarm(Date.now() + RETENTION_MS);
-    }
+    await this.arm();
     return new Response(null, { status: 204 });
   }
 
+  async subscription(request) {
+    const storage = this.state.storage;
+    if (request.method === "DELETE") {
+      await storage.delete("subscription");
+      return new Response(null, { status: 204 });
+    }
+    if (request.method !== "PUT") return new Response(null, { status: 405 });
+    const body = await request.json().catch(() => null);
+    if (typeof body?.url !== "string" || !body.url) return new Response(null, { status: 400 });
+    // 一个 request_id 只发起一次：已经暂存过（哪怕已被领走）就不再接受。
+    if (await storage.get("created_at")) return new Response(null, { status: 409 });
+    await storage.put({ subscription: { url: body.url, expires_at: Date.now() + SUBSCRIPTION_TTL_MS } });
+    await this.arm();
+    return new Response(null, { status: 204 });
+  }
+
+  async claim(request) {
+    const storage = this.state.storage;
+    const body = await request.json().catch(() => null);
+    const pending = await storage.get("subscription");
+    if (!isRecord(pending) || pending.expires_at <= Date.now() || await storage.get("runner")) {
+      return new Response(null, { status: 410 });
+    }
+    const runId = positiveInteger(body?.run_id);
+    const runAttempt = positiveInteger(body?.run_attempt);
+    if (!runId || !runAttempt || !/^[a-f0-9]{64}$/u.test(String(body?.token_sha256 || ""))) {
+      return new Response(null, { status: 400 });
+    }
+    await storage.delete("subscription");
+    await storage.put("runner", { run_id: runId, run_attempt: runAttempt, token_sha256: body.token_sha256 });
+    return Response.json({ url: pending.url });
+  }
+
+  /** 记下第一次写入的时间，并把 alarm 定在最近的一个期限（订阅地址过期 / 整体保留期满）。 */
+  async arm() {
+    const storage = this.state.storage;
+    let createdAt = await storage.get("created_at");
+    if (!createdAt) {
+      createdAt = Date.now();
+      await storage.put("created_at", createdAt);
+    }
+    const pending = await storage.get("subscription");
+    const deadline = Math.min(createdAt + RETENTION_MS, pending?.expires_at ?? Infinity);
+    const current = await storage.getAlarm();
+    if (!current || current > deadline) await storage.setAlarm(deadline);
+  }
+
   async alarm() {
-    await this.state.storage.deleteAll();
+    const storage = this.state.storage;
+    const now = Date.now();
+    const createdAt = await storage.get("created_at");
+    if (!createdAt || now >= createdAt + RETENTION_MS) {
+      await storage.deleteAll();
+      return;
+    }
+    const pending = await storage.get("subscription");
+    if (pending && pending.expires_at <= now) await storage.delete("subscription");
+    await storage.setAlarm(createdAt + RETENTION_MS);
   }
 }

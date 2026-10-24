@@ -37,7 +37,7 @@ const PHASE_STAGE = { subscription: "prepare", scanning: "scan", packaging: "ver
 
 // 每一段的那句话：说「正在做什么」，不说「加载中」。发起扫描与跟进扫描共用。
 export const STAGE_TEXT = {
-  submit: "正在加密订阅地址并提交",
+  submit: "正在提交订阅地址",
   queue: "启动中：排队等 GitHub 分配执行机",
   prepare: "启动中：准备环境、拉取订阅",
   scan: "正在逐个检测节点",

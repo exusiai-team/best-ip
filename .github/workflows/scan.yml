@@ -9,12 +9,8 @@ on:
         description: Browser-generated correlation ID
         required: true
         type: string
-      key_id:
-        description: Public encryption key fingerprint
-        required: true
-        type: string
-      encrypted_subscription_url:
-        description: AES-GCM URL envelope; never send plaintext here
+      worker_url:
+        description: Worker origin that holds the subscription for this request
         required: true
         type: string
 
@@ -22,15 +18,18 @@ concurrency:
   group: best-ip-scan
   cancel-in-progress: false
 
+# id-token: write 只用来向 GitHub 要一张 OIDC 令牌，向 Worker 证明「我是 main 上 scan.yml 的这次运行」，
+# 换回暂存在 Worker 的订阅地址（scripts/claim_subscription.mjs）。整条通路没有 Actions secret 以外的共享密钥。
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   scan:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # 精简过的准备段（约 2~3 秒）：
-    # - 校验输入、写 IPure 配置、解密订阅合成一步，私钥用完立刻删，不再留到收尾；
+    # - 校验输入、写 IPure 配置、凭 OIDC 向 Worker 领取订阅合成一步；
     # - 不锁版本：Python 依赖按 pyproject.toml 解析最新，Mihomo 取最新 release。
     # - Python 解释器（uv 管理的 3.13）+ .venv 按天缓存：每天第一次扫描走「装 uv → uv sync」重新解析
     #   最新依赖（约 3 秒），同一天内后续扫描直接用 .venv/bin/python。
@@ -44,37 +43,22 @@ jobs:
           ref: main
           persist-credentials: false
 
-      - name: Validate inputs and decrypt subscription URL
+      - name: Validate inputs and claim subscription URL
         env:
           REQUEST_ID: ${{ inputs.request_id }}
-          KEY_ID: ${{ inputs.key_id }}
-          EXPECTED_KEY_ID: ${{ vars.SCAN_KEY_ID }}
-          BEST_IP_ENVELOPE: ${{ inputs.encrypted_subscription_url }}
-          RELAY_URL: ${{ vars.SCAN_RELAY_URL }}
-          RELAY_TOKEN: ${{ secrets.SCAN_RELAY_TOKEN }}
+          WORKER_URL: ${{ inputs.worker_url }}
           IPURE_CONFIG_YAML: ${{ secrets.IPURE_CONFIG_YAML }}
-          SCAN_PRIVATE_KEY_PEM: ${{ secrets.SCAN_PRIVATE_KEY_PEM }}
         shell: bash
         run: |
           [[ "$REQUEST_ID" =~ ^[A-Za-z0-9_-]{1,128}$ ]]
-          [[ "$KEY_ID" =~ ^[A-Za-z0-9:_-]{8,256}$ ]]
-          [[ -n "$BEST_IP_ENVELOPE" && ${#BEST_IP_ENVELOPE} -le 65535 ]]
-          [[ -n "$EXPECTED_KEY_ID" && "$KEY_ID" == "$EXPECTED_KEY_ID" ]]
-          [[ -n "$RELAY_URL" && "$RELAY_URL" == https://* ]]
-          [[ -n "$RELAY_TOKEN" && ${#RELAY_TOKEN} -ge 16 ]]
+          [[ "$WORKER_URL" =~ ^https://[A-Za-z0-9.-]+$ ]]
           test -n "$IPURE_CONFIG_YAML"
-          test -n "$SCAN_PRIVATE_KEY_PEM"
           umask 077
           mkdir -p config
           printf '%s\n' "$IPURE_CONFIG_YAML" > config/ipure.yml
-          key_path="$RUNNER_TEMP/scan-private.pem"
-          trap 'rm -f "$key_path"' EXIT
-          printf '%s\n' "$SCAN_PRIVATE_KEY_PEM" > "$key_path"
-          node scripts/decrypt_subscription.mjs \
-            --private-key "$key_path" \
-            --output "$RUNNER_TEMP/subscription-url" \
-            --request-id "$REQUEST_ID" \
-            --key-id "$KEY_ID"
+          node scripts/claim_subscription.mjs \
+            --subscription-file "$RUNNER_TEMP/subscription-url" \
+            --token-file "$RUNNER_TEMP/runner-token"
 
       - name: Pick today's environment cache key
         id: day
@@ -115,18 +99,18 @@ jobs:
           .venv/bin/python -c 'from backend.app.sources.ipure_config import load_ipure_headers; headers = load_ipure_headers(); assert headers.get("cookie"), "IPure verification cookie is required"'
 
       # 这一步也会把扫描进度（计数与每个节点的阶段，不含出口 IP 与评分）回报给 Worker 的
-      # /api/scan-progress，与订阅中继同一个 Worker、同一把 SCAN_RELAY_TOKEN；回报失败不影响扫描。
+      # /api/scan-progress，与订阅中继同一个 Worker、同一张领取时拿到的 runner 令牌；回报失败不影响扫描。
       - name: Run production scan
         env:
           BEST_IP_MIHOMO_PATH: ${{ github.workspace }}/runtime/mihomo/mihomo
           # 托管 runner 只有 2~4 核，默认公式 min(16, max(8, CPU)) 落在 8 并发；节点检测几乎全是等网络，
           # 同一条 25 节点订阅 8→16 并发的墙钟实测从 50.9s/70.9s 降到 30.4s/31.2s（见 backend/app/config.py）。
           BEST_IP_MAX_PARALLEL_NODES: "16"
-          BEST_IP_SUBSCRIPTION_RELAY_URL: ${{ vars.SCAN_RELAY_URL }}
-          BEST_IP_SUBSCRIPTION_RELAY_TOKEN: ${{ secrets.SCAN_RELAY_TOKEN }}
+          BEST_IP_SUBSCRIPTION_RELAY_URL: ${{ inputs.worker_url }}/api/subscription-relay
           REQUEST_ID: ${{ inputs.request_id }}
         shell: bash
         run: >-
+          BEST_IP_SUBSCRIPTION_RELAY_TOKEN="$(cat "$RUNNER_TEMP/runner-token")"
           .venv/bin/python scripts/run_scan.py
           --request-id "$REQUEST_ID"
           --subscription-file "$RUNNER_TEMP/subscription-url"
@@ -144,5 +128,5 @@ jobs:
         if: always()
         shell: bash
         run: |
-          rm -f "$RUNNER_TEMP/scan-private.pem" "$RUNNER_TEMP/subscription-url" config/ipure.yml
+          rm -f "$RUNNER_TEMP/runner-token" "$RUNNER_TEMP/subscription-url" config/ipure.yml
           rm -rf runtime/mihomo

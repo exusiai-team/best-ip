@@ -1,9 +1,11 @@
-import { GITHUB_OWNER, GITHUB_REPOSITORY, GITHUB_WORKFLOW, GITHUB_WORKFLOW_PATH, GITHUB_REF, MAX_REQUEST_BYTES, ENVELOPE_TTL_SECONDS, MAX_JOB_PAGES, REQUEST_ID_PATTERN, KEY_ID_PATTERN, isRecord, positiveInteger, assertWorkerConfigured } from "./config.js";
+import { GITHUB_OWNER, GITHUB_REPOSITORY, GITHUB_WORKFLOW, GITHUB_WORKFLOW_PATH, GITHUB_REF, MAX_REQUEST_BYTES, MAX_JOB_PAGES, REQUEST_ID_PATTERN, isRecord, positiveInteger, assertWorkerConfigured } from "./config.js";
 import { HttpError, json } from "./responses.js";
 import { assertSameOrigin, signScanToken, verifyScanToken } from "./auth.js";
 import { githubJson } from "./github.js";
 import { findArtifact } from "./artifacts.js";
 import { readScanProgress } from "./progress.js";
+import { assertTargetUrl } from "./relay.js";
+import { stashSubscription, dropSubscription } from "./runner.js";
 
 export async function readJsonBody(request) {
   const contentLength = Number(request.headers.get("Content-Length"));
@@ -21,40 +23,18 @@ export async function readJsonBody(request) {
   }
 }
 
-export function validateEnvelope(body, env) {
+export function validateScanRequest(body) {
   if (!isRecord(body)) throw new HttpError(400, "请求结构无效", "invalid_request");
   const requestId = String(body.request_id || "");
-  const keyId = String(body.key_id || "").toLowerCase();
-  const configuredKeyId = String(env.SCAN_KEY_ID || "").trim().toLowerCase();
-  const envelope = body.envelope;
   if (!REQUEST_ID_PATTERN.test(requestId)) throw new HttpError(400, "request_id 无效", "invalid_request");
-  if (!KEY_ID_PATTERN.test(keyId) || !configuredKeyId || keyId !== configuredKeyId) {
-    throw new HttpError(400, "扫描公钥指纹不匹配", "invalid_key_id");
+  let subscriptionUrl;
+  try {
+    // 与订阅中继同一套公网地址校验；runner 下载时还会逐跳再验一次。
+    subscriptionUrl = assertTargetUrl(String(body.subscription_url || "").trim()).href;
+  } catch {
+    throw new HttpError(400, "订阅地址必须是公开的 http/https 链接，且不能携带账号密码", "invalid_subscription_url");
   }
-  if (!isRecord(envelope) || envelope.request_id !== requestId || String(envelope.kid || "").toLowerCase() !== keyId) {
-    throw new HttpError(400, "订阅密文 envelope 无效", "invalid_envelope");
-  }
-  if (envelope.v !== 1 || envelope.alg !== "RSA-OAEP-3072-SHA256+AES-256-GCM") {
-    throw new HttpError(400, "订阅密文算法无效", "invalid_envelope");
-  }
-  const now = Math.floor(Date.now() / 1000);
-  if (
-    !Number.isSafeInteger(envelope.issued_at) ||
-    !Number.isSafeInteger(envelope.expires_at) ||
-    envelope.expires_at <= now ||
-    envelope.expires_at - envelope.issued_at !== ENVELOPE_TTL_SECONDS ||
-    envelope.issued_at > now + 60
-  ) {
-    throw new HttpError(400, "订阅密文已过期或时间无效", "expired_envelope");
-  }
-  for (const field of ["ek", "iv", "aad", "ct"]) {
-    if (typeof envelope[field] !== "string" || envelope[field].length < 1 || envelope[field].length > 65535) {
-      throw new HttpError(400, "订阅密文字段无效", "invalid_envelope");
-    }
-  }
-  const serialized = JSON.stringify(envelope);
-  if (serialized.length > 65535) throw new HttpError(413, "订阅密文超过安全上限", "envelope_too_large");
-  return { requestId, keyId, envelope, serialized };
+  return { requestId, subscriptionUrl };
 }
 
 export function expectedRunTitle(requestId) {
@@ -163,7 +143,9 @@ export async function createScan(request, env) {
   assertSameOrigin(request);
   assertWorkerConfigured(env);
   const body = await readJsonBody(request);
-  const { requestId, keyId, serialized } = validateEnvelope(body, env);
+  const { requestId, subscriptionUrl } = validateScanRequest(body);
+  // 订阅地址只进 Durable Object，不进 workflow 输入；runner 凭 OIDC 来领（worker/runner.js）。
+  await stashSubscription(env, requestId, subscriptionUrl);
   const dispatchedAt = Date.now();
   await githubJson(
     env,
@@ -175,12 +157,14 @@ export async function createScan(request, env) {
         ref: GITHUB_REF,
         inputs: {
           request_id: requestId,
-          key_id: keyId,
-          encrypted_subscription_url: serialized,
+          worker_url: new URL(request.url).origin,
         },
       }),
     },
-  );
+  ).catch(async (error) => {
+    await dropSubscription(env, requestId);
+    throw error;
+  });
   return json(
     {
       request_id: requestId,
