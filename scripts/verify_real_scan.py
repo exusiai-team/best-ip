@@ -33,7 +33,8 @@ from backend.app.results.artifact import (
 from backend.app.results.store import result_store
 from backend.app.scan.errors import _TRANSPORT_ERROR_TYPES
 from backend.app.sources.coffee import _is_same_ip, _trace_ip
-from backend.app.sources.http import IPURE_HOST
+from backend.app.sources.http import IPQS_HOST, IPURE_HOST
+from backend.app.sources.ipqs import ipqs_fields, ipqs_url
 from backend.app.sources.ipure import (
     IPURE_RESTRICTED_LEVEL,
     IPURE_RESTRICTED_SCORE,
@@ -127,6 +128,26 @@ def _node_ipure_score_valid(record: dict[str, Any], ipure: dict[str, Any]) -> bo
         if scores.get(scenario_id) != expected:
             return False
     return True
+
+
+def _node_ipqs_valid(record: dict[str, Any], ipqs: Any, evidence: dict[str, Any]) -> bool:
+    """Every node with an exit IP carries a 1ms report whose flattened fields match it."""
+
+    if not isinstance(ipqs, dict) or not isinstance(ipqs.get("data"), dict):
+        return False
+    direct = ipqs.get("direct_fallback")
+    return (
+        ipqs.get("ok") is True
+        and ipqs.get("attempted") is True
+        and isinstance(direct, bool)
+        and ipqs.get("via_mihomo") is (not direct)
+        and evidence.get("ipqs_via_direct_fallback") is direct
+        and ipqs.get("proxy_url") == evidence.get("proxy_url")
+        and ipqs.get("target_host") == IPQS_HOST
+        and ipqs.get("url") == ipqs_url(record["exit_ip"])
+        and all(record.get(key) == value for key, value in ipqs_fields(ipqs).items())
+        and record.get("ipqs_score") is not None
+    )
 
 
 def _require_no_failed_nodes(job: dict[str, Any]) -> None:
@@ -474,6 +495,12 @@ async def verify() -> None:
                     raise RuntimeError(
                         f"节点 {index} IPure 评分证据无效：{reason or '响应缺少纯净度总分'}"
                     )
+                ipqs = requests.get("ipqs")
+                if not _node_ipqs_valid(record, ipqs, evidence):
+                    reason = " ".join(str((ipqs or {}).get("error") or "").split())[:200]
+                    raise RuntimeError(
+                        f"节点 {index} 1ms IPQS 证据无效：{reason or '响应缺少最终评分'}"
+                    )
                 completeness = record.get("completeness")
                 checks = completeness.get("checks") if isinstance(completeness, dict) else None
                 if (
@@ -484,6 +511,7 @@ async def verify() -> None:
                     or checks.get("lookup_received") is not True
                     or checks.get("lookup_matches_trace") is not True
                     or checks.get("ipure_recorded") is not (ipure.get("ok") is True)
+                    or checks.get("ipqs_recorded") is not True
                 ):
                     raise RuntimeError(f"节点 {index} 完整性证据无效")
             elif status == "failed":
@@ -571,6 +599,13 @@ async def verify() -> None:
         print(
             f"IPure 评分覆盖：{len(scorable)}/{total} 个节点获得纯净度总分与六项场景评分"
             f"（失败节点没有出口 IP，无法查询）"
+        )
+        via_proxy = sum(
+            1 for record in scorable if record["requests"]["ipqs"].get("via_mihomo") is True
+        )
+        print(
+            f"1ms IPQS 覆盖：{len(scorable)}/{total} 个节点获得评分，"
+            f"其中 {via_proxy} 个经节点代理、{len(scorable) - via_proxy} 个走宿主直连兜底"
         )
         _require_no_failed_nodes(job)
         print(

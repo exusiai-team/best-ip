@@ -22,10 +22,16 @@ import { SCENARIO_LABELS } from "./data.js";
 import { comparableScore, ipureScoreInlineStyle } from "./score-color.js";
 
 const STATUS_LABELS = { success: "完整", partial: "部分", failed: "失败" };
-const SOURCE_LABELS = { ipure: "IPure", coffee: "Coffee" };
+const SOURCE_LABELS = { ipqs: "1ms IPQS", ipure: "IPure", coffee: "Coffee" };
+
+// 1ms 评分的扣分项（done.parts[].k 去掉 p_ 前缀），只用来写 tooltip。
+const IPQS_DEDUCTIONS = {
+  hosting: "机房 IP", business: "商业网络", proxy: "代理标记", vpn: "VPN 标记",
+  tor: "Tor 出口", abuser: "滥用记录", risk: "第三方风险分", dnsbl: "DNS 黑名单",
+};
 
 /* ------------------------------------------------------------- 取值函数 --- */
-// IPure usageType → 接入列的词。住宅、移动是「真人上网」的出口，风控最友好，着绿色。
+// usage_type → 接入列的词（1ms 多源共识优先，回落 IPure、Coffee，见 network_source）。住宅、移动是「真人上网」的出口，风控最友好，着绿色。
 const USAGE_LABELS = {
   residential: "住宅", mobile: "移动", business: "商业", hosting: "机房", education: "教育", government: "政府",
 };
@@ -79,7 +85,7 @@ function joined(...parts) {
 export const COLUMNS = [
   { key: "rank", label: "#", width: "40px" },
   {
-    key: "ident", label: "节点", width: "260px", sort: "text", filter: "text",
+    key: "ident", label: "节点", width: "240px", sort: "text", filter: "text",
     placeholder: "名称/协议",
     sortValue: (r) => r.node || null,
     filterValue: (r) => joined(r.node, r.type, STATUS_LABELS[r.status]),
@@ -115,6 +121,12 @@ export const COLUMNS = [
     options: ["原生", "广播", "未知"],
     sortValue: (r) => ({ 原生: 0, 广播: 1, 未知: 2 })[nativeOf(r)] ?? null,
     filterValue: nativeOf,
+  },
+  {
+    key: "ipqs", label: "1ms", width: "72px", align: "center", sort: "num", filter: "num",
+    title: "1ms IPQS 综合评分",
+    sortValue: (r) => r.ipqs_score,
+    filterValue: (r) => r.ipqs_score,
   },
   {
     key: "coffee", label: "Coffee", width: "72px", align: "center", sort: "num", filter: "num",
@@ -427,6 +439,42 @@ function scorePill(document, { kind, value, note }) {
   return pill;
 }
 
+function gradeBand(grade) {
+  if (grade === "A" || grade === "B") return "good";
+  if (grade === "C") return "warn";
+  return grade ? "bad" : "na";
+}
+
+/** 1ms 评分：分数 + 等级；tooltip 列出扣分项；有报告地址时分数本身就是出处链接（导出时降成 span）。 */
+function ipqsCell(document, result) {
+  const td = cell(document, "ipqs", "cell-ipqs");
+  td.dataset.align = "center";
+  const score = result.ipqs_score;
+  const pill = el(document, result.ipqs_report_url ? "a" : "span", "score");
+  if (result.ipqs_report_url) {
+    pill.href = result.ipqs_report_url;
+    pill.target = "_blank";
+    pill.rel = "noopener noreferrer";
+  }
+  if (score === null || score === undefined) {
+    pill.dataset.band = "na";
+    pill.textContent = "—";
+    pill.title = result.exit_ip ? "1ms 未返回评分" : "未连接成功，无 1ms 评分";
+  } else {
+    pill.dataset.band = gradeBand(result.ipqs_grade);
+    pill.append(document.createTextNode(String(score)));
+    if (result.ipqs_grade) pill.append(Object.assign(el(document, "small", "grade"), { textContent: result.ipqs_grade }));
+    const deductions = (result.ipqs_deductions || []).map((item) => `${IPQS_DEDUCTIONS[item.key] || item.key} −${item.points}`);
+    pill.title = [
+      `1ms 综合评分 ${score}${result.ipqs_grade ? ` · ${result.ipqs_grade} 级` : ""}（满分 100，按扣分计）`,
+      deductions.length ? `扣分：${deductions.join("，")}` : "无扣分项",
+      result.ipqs_report_url ? "点击打开 1ms 完整报告" : "",
+    ].filter(Boolean).join("\n");
+  }
+  td.append(pill);
+  return td;
+}
+
 function coffeeCell(document, result) {
   const td = cell(document, "coffee", "cell-coffee");
   td.dataset.align = "center";
@@ -522,7 +570,7 @@ export function createRow(result, { position, tier }, document) {
     row.append(absentCell(document, result));
   }
 
-  row.append(coffeeCell(document, result), ipureCell(document, result));
+  row.append(ipqsCell(document, result), coffeeCell(document, result), ipureCell(document, result));
   if (result.exit_ip) SCENARIO_COLUMNS.forEach((column) => row.append(scenarioCell(document, result, column)));
   else row.append(scenarioNoneCell(document, result));
   return row;

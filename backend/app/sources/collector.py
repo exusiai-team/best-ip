@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import quote
 
 from . import coffee, gpt_checks
+from . import ipqs as ipqs_source
 from . import ipure as ipure_source
 from .coffee import (
     _global_ping_summary,
@@ -26,6 +27,8 @@ from .http import (
     COFFEE_ORIGIN,
     COFFEE_PAGE_URL,
     COFFEE_TRACE_URL,
+    IPQS_HOST,
+    IPQS_TIMEOUT_SECONDS,
     IPURE_HOST,
     IPURE_ORIGIN,
     IPURE_TIMEOUT_SECONDS,
@@ -128,7 +131,17 @@ class CoffeeCollector:
                         timeout_seconds=self.transport.deadline(IPURE_TIMEOUT_SECONDS),
                     )
                 )
-                all_request_tasks = [gpt_task, lookup_task, *optional_tasks, ipure_task]
+                ipqs_task = asyncio.create_task(
+                    ipqs_source.request(
+                        self.transport,
+                        client,
+                        ipqs_source.ipqs_url(exit_ip),
+                        timeout_seconds=self.transport.deadline(IPQS_TIMEOUT_SECONDS),
+                    )
+                )
+                all_request_tasks = [
+                    gpt_task, lookup_task, *optional_tasks, ipure_task, ipqs_task
+                ]
                 try:
                     lookup = await lookup_task
                     lookup_data = lookup.get("data") if isinstance(lookup.get("data"), dict) else {}
@@ -145,6 +158,7 @@ class CoffeeCollector:
                     global_ping, port_scan, ping_check = await asyncio.gather(*optional_tasks)
                     gpt_requests = await gpt_task
                     ipure = await ipure_task
+                    ipqs = await ipqs_task
                 finally:
                     for task in all_request_tasks:
                         if not task.done():
@@ -159,6 +173,7 @@ class CoffeeCollector:
                 ping_check = _missing_result("", reason, skipped=True)
                 related = _missing_result("", reason, skipped=True)
                 ipure = _missing_result("", reason, skipped=True)
+                ipqs = _missing_result("", reason, skipped=True)
 
         status = _node_status(
             page,
@@ -170,6 +185,7 @@ class CoffeeCollector:
                 "port_scan": port_scan,
                 "ping_check": ping_check,
                 "ipure": ipure,
+                "ipqs": ipqs,
                 **(
                     {"related": related}
                     if lookup_data.get("related_pending")
@@ -180,7 +196,7 @@ class CoffeeCollector:
         )
         final_exit_ip = exit_ip if status != "failed" else None
         error = _combined_error(
-            page, trace, lookup, global_ping, port_scan, ping_check, related, ipure
+            page, trace, lookup, global_ping, port_scan, ping_check, related, ipure, ipqs
         )
         request_results = {
             "page": page,
@@ -191,6 +207,7 @@ class CoffeeCollector:
             "ping_check": ping_check,
             "related": related,
             "ipure": ipure,
+            "ipqs": ipqs,
         }
         completeness = _completeness(request_results, exit_ip, lookup_data)
         gpt_check = _gpt_check_summary(gpt_requests, lookup_data)
@@ -199,6 +216,7 @@ class CoffeeCollector:
         identity = _network_identity(
             exit_ip if status != "failed" else "",
             _ipure_field(ipure, "network"),
+            ipqs.get("data"),
             lookup_data,
             coffee_summary,
         )
@@ -210,6 +228,7 @@ class CoffeeCollector:
             "ipure_scores": ipure_scores,
             "ipure_report_url": _ipure_field(ipure, "report_url"),
             "gpt_check": gpt_check,
+            **ipqs_source.ipqs_fields(ipqs),
         }
         finished_at = _now()
 
@@ -245,6 +264,7 @@ class CoffeeCollector:
                 "trust_env": False,
                 "ipure_budget_remaining": ipure.get("budget_remaining"),
                 "ipure_via_direct_fallback": bool(ipure.get("direct_fallback")),
+                "ipqs_via_direct_fallback": bool(ipqs.get("direct_fallback")),
             },
             "completeness": completeness,
             "requests": {
@@ -281,16 +301,21 @@ class CoffeeCollector:
 def _network_identity(
     exit_ip: str,
     ipure_network: Any,
+    ipqs_data: Any,
     lookup_data: dict[str, Any],
     coffee_summary: dict[str, Any],
 ) -> dict[str, Any]:
-    """出口 IP / 国家和地区 / 服务商 / 接入 / 原生性：IPure 报告优先，它没说的那一组才回落 Coffee。
+    """出口 IP / 国家和地区 / 服务商：IPure 报告优先，它没说的那一组才回落 Coffee。
+
+    接入与原生性改由 1ms IPQS 的多源共识优先（十余个源投票，比单一来源稳），
+    1ms 没给出结论时依次回落 IPure、Coffee。
 
     出口 IP 仍由 trace 发现（IPure 的查询必须带上一个 IP），IPure 回显的 ip 与之一致时记为
     「由 IPure 确认」。每一组各自记来源（network_source），页面与审计都能看出这一格是谁说的。
     """
 
     network = ipure_network if isinstance(ipure_network, dict) else {}
+    ipqs = ipqs_data if isinstance(ipqs_data, dict) else {}
     identity: dict[str, Any] = {}
     source: dict[str, str | None] = {}
 
@@ -336,9 +361,13 @@ def _network_identity(
     else:
         source["isp"] = "coffee" if coffee_summary.get("isp") or coffee_summary.get("asn") else None
 
-    # 接入：IPure 的 usageType 六档（住宅 / 移动 / 商业 / 机房 / 教育 / 政府）；
-    # unknown 才回落 Coffee。
-    if network.get("usage_type"):
+    # 接入：六档（住宅 / 移动 / 商业 / 机房 / 教育 / 政府），1ms → IPure → Coffee。
+    if ipqs.get("type"):
+        source["kind"] = "ipqs"
+        identity["usage_type"] = ipqs["type"]
+        identity["is_residential"] = ipqs["type"] in ("residential", "mobile")
+        identity["is_datacenter"] = ipqs["type"] == "hosting"
+    elif network.get("usage_type"):
         source["kind"] = "ipure"
         identity["usage_type"] = network["usage_type"]
         identity["is_residential"] = network["is_residential"]
@@ -348,26 +377,39 @@ def _network_identity(
             "coffee" if isinstance(coffee_summary.get("is_residential"), bool) else None
         )
 
-    # 原生性：nativeType 同理；广播时用 IPure 的登记国补出「广播 IP (XX)」。
-    if isinstance(network.get("is_native"), bool):
+    # 原生性：1ms → IPure → Coffee；广播时用登记国补出「广播 IP (XX)」。
+    if isinstance(ipqs.get("native"), bool):
+        source["native"] = "ipqs"
+        identity["is_native"] = ipqs["native"]
+        _describe_native(
+            identity, ipqs["native"], ipqs.get("registered_country"), ipqs.get("country")
+        )
+    elif isinstance(network.get("is_native"), bool):
         source["native"] = "ipure"
         identity["is_native"] = network["is_native"]
-        registered = network.get("registered_country")
-        if network["is_native"]:
-            identity["native_status"] = "原生 IP"
-            identity["native_detail"] = ""
-        else:
-            identity["native_status"] = f"广播 IP ({registered})" if registered else "广播 IP"
-            identity["native_detail"] = (
-                f"IP注册在 {registered} 和IP归属地 {geo['country_code'] or ''} 不一致".strip()
-                if registered
-                else ""
-            )
+        _describe_native(
+            identity, network["is_native"], network.get("registered_country"), geo["country_code"]
+        )
     else:
         source["native"] = "coffee" if isinstance(coffee_summary.get("is_native"), bool) else None
 
     identity["network_source"] = source
     return identity
+
+
+def _describe_native(
+    identity: dict[str, Any], native: bool, registered: Any, located: Any
+) -> None:
+    """原生 / 广播的展示文案；广播时写明登记国与归属地，读表的人能看出差在哪。"""
+
+    if native:
+        identity["native_status"] = "原生 IP"
+        identity["native_detail"] = ""
+        return
+    identity["native_status"] = f"广播 IP ({registered})" if registered else "广播 IP"
+    identity["native_detail"] = (
+        f"IP注册在 {registered} 和IP归属地 {located or ''} 不一致".strip() if registered else ""
+    )
 
 
 def _node_status(
@@ -400,6 +442,7 @@ def _completeness(
         "port_scan_recorded": _request_recorded(requests["port_scan"]),
         "ping_check_recorded": _request_recorded(requests["ping_check"]),
         "ipure_recorded": _request_recorded(requests["ipure"]),
+        "ipqs_recorded": _request_recorded(requests["ipqs"]),
         "related_recorded": (
             _request_recorded(requests["related"])
             if lookup_data.get("related_pending") or lookup_data.get("related_domains_pending")
@@ -436,7 +479,7 @@ def _combined_error(*results: dict[str, Any]) -> str | None:
         result.get("error")
         for result in results
         if result.get("error")
-        and (not result.get("skipped") or result.get("target_host") == IPURE_HOST)
+        and (not result.get("skipped") or result.get("target_host") in {IPURE_HOST, IPQS_HOST})
     ]
     return "；".join(dict.fromkeys(errors)) or None
 

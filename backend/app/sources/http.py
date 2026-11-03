@@ -16,6 +16,10 @@ IPURE_HOST = "ipure.dev"
 IPURE_ORIGIN = f"https://{IPURE_HOST}"
 IPURE_TIMEOUT_SECONDS = 30.0
 IPURE_MAX_RESPONSE_BYTES = 1_000_000
+IPQS_HOST = "ipqs.1ms.dog"
+IPQS_ORIGIN = f"https://{IPQS_HOST}"
+IPQS_TIMEOUT_SECONDS = 20.0
+IPQS_MAX_RESPONSE_BYTES = 256_000
 GPT_PROBE_TARGETS = [
     {"name": "chatgpt.com", "url": "https://chatgpt.com/cdn-cgi/trace"},
     {"name": "api.openai.com", "url": "https://api.openai.com/v1/models"},
@@ -226,3 +230,28 @@ def _validate_ipure_url(url: str) -> None:
         ipaddress.ip_address(value)
     except ValueError as exc:
         raise ValueError(f"IPure IP 参数无效：{url}") from exc
+
+
+def _validate_ipqs_url(url: str) -> None:
+    parsed = urlsplit(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"1ms IPQS 请求端口无效：{url}") from exc
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != IPQS_HOST
+        or parsed.username
+        or parsed.password
+        or port is not None
+        or parsed.fragment
+        or parsed.path != "/api/check"
+        or set(query) != {"ip"}
+        or len(query["ip"]) != 1
+    ):
+        raise ValueError(f"拒绝未允许的 1ms IPQS 请求：{url}")
+    try:
+        ipaddress.ip_address(query["ip"][0])
+    except ValueError as exc:
+        raise ValueError(f"1ms IPQS IP 参数无效：{url}") from exc
