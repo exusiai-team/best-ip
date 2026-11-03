@@ -155,6 +155,17 @@ come from the workspace proxy or, when the node egress cannot connect, from a re
 host-side query: such a record sets `requests.ipure.direct_fallback:true`,
 `via_mihomo:false`, and `proxy_evidence.ipure_via_direct_fallback:true`. Both validators
 cross-check that trio, so a direct score can never be presented as proxy evidence.
+1ms IPQS (`https://ipqs.1ms.dog/api/check?ip=`, NDJSON; only the terminal `done`
+event is read) is flattened into five optional record fields: `ipqs_score` (integer
+0..100 or null), `ipqs_grade` (`A B C D F` or null, never without a score),
+`ipqs_type` (`residential mobile hosting business education government` or null;
+unknown upstream values stay only in `requests.ipqs.data.type_raw`), `ipqs_native`
+(true/false/null) and `ipqs_report_url`. Deductions, registry country, flags and the
+raw verdict stay in `requests.ipqs.data`. The request goes through the node proxy and,
+like IPure, may fall back to a recorded host-side query: `requests.ipqs.direct_fallback`,
+`via_mihomo` and `proxy_evidence.ipqs_via_direct_fallback` must agree. A missing 1ms
+report makes the node `partial` (`completeness.checks.ipqs_recorded`). These fields are
+not part of the manifest summary, so manifests written before them still verify.
 Retry metadata, when present, must be internally consistent.
 Required and optional record fields are enforced by Python's ResultStore validator;
 fixtures carry the minimal valid set, not a real enrichment response.

@@ -6,6 +6,7 @@ import json
 from typing import Any
 from urllib.parse import urlsplit
 
+from ..sources.ipqs import IPQS_GRADES, IPQS_TYPES
 from ..sources.ipure import IPURE_RESTRICTED_SCORE, IPURE_SCENARIOS
 
 _SUMMARY_KEYS = (
@@ -93,6 +94,11 @@ _NODE_FIELDS = {
     "coffee_score",
     "ipure_scores",
     "ipure_report_url",
+    "ipqs_score",
+    "ipqs_grade",
+    "ipqs_type",
+    "ipqs_native",
+    "ipqs_report_url",
     "is_residential",
     "is_datacenter",
     "is_native",
@@ -249,6 +255,7 @@ def validate_node(job_id: str, index: int, record: dict[str, Any]) -> None:
             raise ResultStoreError("成功节点记录的采集或代理证据无效")
         validate_ipure_scores(record)
         validate_ipure_evidence(record["proxy_evidence"], record["requests"])
+        validate_ipqs(record)
         validate_exit_ip(record.get("exit_ip"))
     elif status == "failed":
         if record.get("exit_ip") is not None:
@@ -306,6 +313,35 @@ def validate_ipure_evidence(evidence: dict[str, Any], requests: dict[str, Any]) 
         raise ResultStoreError("节点 IPure 直连证据与请求记录不一致")
     if ipure.get("via_mihomo") is not (not direct):
         raise ResultStoreError("节点 IPure 出口证据无效")
+
+
+def validate_ipqs(record: dict[str, Any]) -> None:
+    """1ms IPQS fields: closed value domains, and a direct score is never proxy evidence."""
+
+    score = record.get("ipqs_score")
+    grade = record.get("ipqs_grade")
+    if score is not None and (
+        not isinstance(score, int) or isinstance(score, bool) or not 0 <= score <= 100
+    ):
+        raise ResultStoreError("节点 1ms IPQS 评分取值无效")
+    if (
+        (grade is not None and (score is None or grade not in IPQS_GRADES))
+        or record.get("ipqs_type") not in (None, *IPQS_TYPES)
+        or not (record.get("ipqs_native") is None or isinstance(record.get("ipqs_native"), bool))
+    ):
+        raise ResultStoreError("节点 1ms IPQS 字段取值无效")
+    ipqs = record["requests"].get("ipqs")
+    if not isinstance(ipqs, dict):
+        if score is not None:
+            raise ResultStoreError("节点 1ms IPQS 评分缺少请求证据")
+        return
+    direct = ipqs.get("direct_fallback")
+    if (
+        not isinstance(direct, bool)
+        or record["proxy_evidence"].get("ipqs_via_direct_fallback") is not direct
+        or ipqs.get("via_mihomo") is not (not direct)
+    ):
+        raise ResultStoreError("节点 1ms IPQS 出口证据无效")
 
 
 def validate_exit_ip(value: Any) -> None:

@@ -14,8 +14,8 @@ from urllib.parse import quote
 import httpx
 import yaml
 
-COFFEE_HOST = "ip.net.coffee"
-IPURE_HOST = "ipure.dev"
+from .sources.http import COFFEE_HOST, IPQS_HOST, IPURE_HOST
+
 MIHOMO_NOT_READY_MESSAGE = (
     "Mihomo 核心未就绪，请运行 uv run python scripts/download_mihomo.py"
 )
@@ -274,6 +274,7 @@ class MihomoProcess:
             "rules": [
                 f"DOMAIN,{COFFEE_HOST},{self.group_name}",
                 f"DOMAIN,{IPURE_HOST},{self.group_name}",
+                f"DOMAIN,{IPQS_HOST},{self.group_name}",
                 f"DOMAIN,chatgpt.com,{self.group_name}",
                 f"DOMAIN,api.openai.com,{self.group_name}",
                 "MATCH,REJECT",

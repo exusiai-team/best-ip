@@ -2,6 +2,8 @@
 
 Status: implemented
 
+> 十列宽表的列结构与交互已被[来源分组的两级表头重构](2026-11-03-frontend-grouped-table-redesign.md)部分取代；mhtml 快照部分仍然有效。
+
 ## Problem
 
 旧 `frontend/` 把一切都塞进一页，但把关键信息藏了两层：

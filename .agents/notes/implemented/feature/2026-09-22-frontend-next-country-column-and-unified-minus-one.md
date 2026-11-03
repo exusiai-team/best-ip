@@ -2,6 +2,8 @@
 
 Status: implemented
 
+> 「场景缺项统一显示 -1」已被[来源分组的两级表头重构](2026-11-03-frontend-grouped-table-redesign.md)取代（场景拆成独立子列，缺项显示「—」）；「归属地只写国家」与 IPure 取值域规则仍然有效。
+
 ## Problem
 
 [十列宽表](2026-09-22-frontend-single-view-redesign.md) 落到真实数据上之后，有两处**显示契约**在真实形态下说不通：

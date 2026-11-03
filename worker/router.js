@@ -60,8 +60,7 @@ export async function fetchHandler(request, env, ctx) {
     // 这个文件是「这次部署怎么跑」的标记，不是「扫描能力齐不齐」的检查：缺 SCAN_KEY_ID 时也要照发。
     // 否则页面读不到配置就退回示例数据，线上会安静地显示一屏合成 IP——一个配置疏漏装成了设计示例。
     // 能力检查交给 /api/* 的 assertWorkerConfigured：那里缺配置就该明确 503。
-    // keyId / publicKeyPath 只有那个会发起扫描的旧前端用得到；字段留着，是为了把 assets 根
-    // 改回 ./frontend 时那条回退路径仍然可用。
+    // keyId / publicKeyPath 供页内发起扫描使用（frontend-next/app/scan-crypto.js 读取并核对指纹）。
     const keyId = String(env.SCAN_KEY_ID || "").trim().toLowerCase();
     return secureResponse(
       new Response(

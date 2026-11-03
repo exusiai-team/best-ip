@@ -3,22 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="节点质量榜：一屏看完每个节点的 Coffee 评分、IPure 评分、归属与原生性">
+  <meta name="description" content="节点质量榜：一屏比较每个节点的 1ms IPQS、Coffee、IPure 评分与出口归属">
   <title>节点质量榜 · Best IP</title>
   <link rel="stylesheet" href="./styles.css">
-  <!-- 空的 data: 图标：只为消掉浏览器自发请求 /favicon.ico 产生的 404 噪音，
-       它不产生任何网络请求，也不进快照的正文外链清单。 -->
+  <!-- 空 data: 图标：只为消掉浏览器自发请求 /favicon.ico 的 404。 -->
   <link rel="icon" href="data:,">
-  <!-- 运行模式由部署方注入：worker 在生产里把 /site-config.js 换成一个定义
-       window.BEST_IP_CONFIG 的脚本（mode: "gateway"）。没有这个文件时（本机静态打开、
-       file://、旧式静态服务）window.BEST_IP_CONFIG 保持未定义，页面退回「示例数据」或
-       ?job= 深链——这是刻意的降级：一份不存在的配置不该让整页白屏。 -->
+  <!-- 在线部署由 Worker 注入 window.BEST_IP_CONFIG（mode: "gateway"）；文件不存在时页面退回示例数据或 ?job= 深链。 -->
   <script src="./site-config.js"></script>
 </head>
 <body>
   <div class="shell">
-    <!-- 顶部条：品牌 + 运行统计 + 全部输入控件。设计上不要导航栏、不要页面说明段、
-         不要模式提示、不要页脚、不要主题开关——这些在旧版里占了首屏三分之一。 -->
     <header class="topbar">
       <div class="topbar-head">
         <div class="brand">
@@ -33,12 +27,8 @@
         <p class="run-stats" id="runStats"></p>
       </div>
 
-      <!-- 发起扫描：只在在线部署里出现（site-config.js 说 mode === "gateway"）。它默认 hidden，
-           由 app/main.js 在确认「本站确实有扫描网关、而且扫描公钥配好了」之后才显出来——
-           静态示例与本机 ?job= 路径下摆一个点了必然失败的按钮，比不摆更糟。
-           订阅地址是 type="text" 的明文输入（用户要求：不要隐私掩码，直接公开输入）。链接本身
-           带 token，所以页面不回显、不落盘、不进导出快照；明文也从不离开浏览器，加密在提交前
-           就完成了（app/scan-crypto.js）。图标相应地从挂锁换成链接符号，免得界面暗示有遮掩。 -->
+      <!-- 发起扫描：只在在线部署且扫描公钥就绪时由 app/main.js 显示。订阅地址按要求明文输入，
+           提交前在浏览器内加密（app/scan-crypto.js），不回显、不落盘、不进导出快照。 -->
       <form class="scanbar" id="scanForm" hidden>
         <div class="scan-row">
           <label class="sr-only" for="subscriptionUrl">Mihomo YAML 订阅链接</label>
@@ -54,35 +44,33 @@
         <p class="scan-progress" id="scanProgress" role="status" aria-live="polite" hidden></p>
       </form>
 
-      <div class="topbar-controls">
-        <div class="field">
+      <div class="toolbar">
+        <div class="field field-search">
           <label class="sr-only" for="query">搜索节点</label>
           <svg class="field-icon" aria-hidden="true" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
             <circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m15.5 15.5 4 4"></path>
           </svg>
-          <input id="query" type="search" placeholder="搜索节点、IP、国家和地区、服务商…" autocomplete="off" spellcheck="false">
+          <input id="query" type="search" placeholder="搜索节点、IP、地区、服务商、ASN…" autocomplete="off" spellcheck="false" aria-keyshortcuts="/">
+          <kbd class="kbd" aria-hidden="true">/</kbd>
         </div>
 
-        <div class="field field-compact">
-          <label class="sr-only" for="statusFilter">状态</label>
-          <select id="statusFilter">
-            <option value="all">全部状态</option>
-            <option value="success">完整</option>
-            <option value="partial">部分</option>
-            <option value="failed">失败</option>
-          </select>
-        </div>
+        <fieldset class="segmented" id="statusFilter">
+          <legend class="sr-only">按状态筛选</legend>
+          <label><input type="radio" name="status" value="all" checked><span>全部<b class="seg-count" data-count="all"></b></span></label>
+          <label><input type="radio" name="status" value="success"><span>完整<b class="seg-count" data-count="success"></b></span></label>
+          <label><input type="radio" name="status" value="partial"><span>部分<b class="seg-count" data-count="partial"></b></span></label>
+          <label><input type="radio" name="status" value="failed"><span>失败<b class="seg-count" data-count="failed"></b></span></label>
+        </fieldset>
 
-        <div class="field field-compact">
+        <fieldset class="toggles">
+          <legend class="sr-only">按 1ms 判定筛选</legend>
+          <label class="toggle" title="只看 1ms 判为住宅或移动网络的出口"><input type="checkbox" id="filterClean"><span>住宅 / 移动</span></label>
+          <label class="toggle" title="只看 1ms 判为原生（注册地与归属地一致）的出口"><input type="checkbox" id="filterNative"><span>原生</span></label>
+        </fieldset>
+
+        <div class="field field-select">
           <label class="sr-only" for="sortSelect">排序</label>
-          <select id="sortSelect">
-            <option value="coffee:desc">Coffee 评分 ↓</option>
-            <option value="coffee:asc">Coffee 评分 ↑</option>
-            <option value="ipure:desc">IPure 总分 ↓</option>
-            <option value="ipure:asc">IPure 总分 ↑</option>
-            <option value="node:asc">节点名称 A→Z</option>
-            <option value="node:desc">节点名称 Z→A</option>
-          </select>
+          <select id="sortSelect"></select>
         </div>
 
         <div class="export-group" role="group" aria-label="导出离线快照">
@@ -90,31 +78,33 @@
             <svg aria-hidden="true" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"></path><path d="m7 12 5 5 5-5"></path><path d="M4 20h16"></path></svg>
             导出 .mhtml
           </button>
-          <button id="exportHtml" type="button" class="btn btn-ghost" title="同样内容的自包含单文件 .html；浏览器不渲染 .mhtml 时的兜底">
-            导出 .html
-          </button>
+          <button id="exportHtml" type="button" class="btn btn-ghost" title="同样内容的自包含单文件 .html；浏览器不渲染 .mhtml 时的兜底">.html</button>
         </div>
       </div>
     </header>
 
-    <p class="result-count" id="resultCount" aria-live="polite"></p>
+    <div class="result-bar">
+      <p class="result-count" aria-live="polite"><span id="resultCount"></span> <button id="clearFilters" type="button" class="link-btn" hidden>清除筛选</button></p>
+      <p class="legend">
+        <span class="legend-rail legend-good"></span>住宅/移动且原生
+        <span class="legend-rail legend-mixed"></span>有折损
+        <span class="legend-rail legend-bad"></span>失败
+        <span class="sep" aria-hidden="true">·</span>点击分数打开来源报告
+      </p>
+    </div>
 
-    <!-- 列表就是表格本身：信息密度靠列宽和行高，不靠弹窗。表头文案、colgroup 宽度
-         与窄屏折叠时每个单元格的 data-label 都由 app/render.js 的 COLUMNS 生成，
-         这里不放第二份列定义，免得三处漂移。 -->
-    <main class="table-wrap">
+    <main class="table-wrap" id="tableWrap">
       <table class="grid" id="grid">
-        <caption class="sr-only">节点质量榜：每行一个节点，含评分、出口 IP、归属与原生性</caption>
+        <caption class="sr-only">节点质量榜：每行一个节点，按来源分组列出出口归属与 1ms、Coffee、IPure 评分</caption>
         <colgroup id="gridColumns"></colgroup>
         <thead id="gridHead"></thead>
         <tbody id="rows"></tbody>
       </table>
+      <div class="empty" id="emptyState" hidden>
+        <p class="empty-title">没有匹配的节点</p>
+        <p class="empty-desc">换个关键字，或点「清除筛选」恢复全部节点。</p>
+      </div>
     </main>
-
-    <div class="empty" id="emptyState" hidden>
-      <p class="empty-title">没有匹配的节点</p>
-      <p class="empty-desc">试试清空搜索框，或把状态切回「全部状态」。</p>
-    </div>
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>

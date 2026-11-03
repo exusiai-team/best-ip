@@ -2,6 +2,8 @@
 
 Status: implemented
 
+> 卡片内部的排布细节已被[来源分组的两级表头重构](2026-11-03-frontend-grouped-table-redesign.md)部分取代；「一个断点当模式开关」的原则仍然有效。
+
 ## Problem
 
 窄屏那一版「一行一节点」的卡片，是把"数据正好长这样"当成了契约：

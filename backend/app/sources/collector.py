@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import quote
 
 from . import coffee, gpt_checks
+from . import ipqs as ipqs_source
 from . import ipure as ipure_source
 from .coffee import (
     _global_ping_summary,
@@ -25,6 +26,8 @@ from .http import (
     COFFEE_ORIGIN,
     COFFEE_PAGE_URL,
     COFFEE_TRACE_URL,
+    IPQS_HOST,
+    IPQS_TIMEOUT_SECONDS,
     IPURE_HOST,
     IPURE_ORIGIN,
     IPURE_TIMEOUT_SECONDS,
@@ -122,7 +125,17 @@ class CoffeeCollector:
                         timeout_seconds=self.transport.deadline(IPURE_TIMEOUT_SECONDS),
                     )
                 )
-                all_request_tasks = [gpt_task, lookup_task, *optional_tasks, ipure_task]
+                ipqs_task = asyncio.create_task(
+                    ipqs_source.request(
+                        self.transport,
+                        client,
+                        ipqs_source.ipqs_url(exit_ip),
+                        timeout_seconds=self.transport.deadline(IPQS_TIMEOUT_SECONDS),
+                    )
+                )
+                all_request_tasks = [
+                    gpt_task, lookup_task, *optional_tasks, ipure_task, ipqs_task
+                ]
                 try:
                     lookup = await lookup_task
                     lookup_data = lookup.get("data") if isinstance(lookup.get("data"), dict) else {}
@@ -139,6 +152,7 @@ class CoffeeCollector:
                     global_ping, port_scan, ping_check = await asyncio.gather(*optional_tasks)
                     gpt_requests = await gpt_task
                     ipure = await ipure_task
+                    ipqs = await ipqs_task
                 finally:
                     for task in all_request_tasks:
                         if not task.done():
@@ -153,6 +167,7 @@ class CoffeeCollector:
                 ping_check = _missing_result("", reason, skipped=True)
                 related = _missing_result("", reason, skipped=True)
                 ipure = _missing_result("", reason, skipped=True)
+                ipqs = _missing_result("", reason, skipped=True)
 
         status = _node_status(
             page,
@@ -164,6 +179,7 @@ class CoffeeCollector:
                 "port_scan": port_scan,
                 "ping_check": ping_check,
                 "ipure": ipure,
+                "ipqs": ipqs,
                 **(
                     {"related": related}
                     if lookup_data.get("related_pending")
@@ -174,7 +190,7 @@ class CoffeeCollector:
         )
         final_exit_ip = exit_ip if status != "failed" else None
         error = _combined_error(
-            page, trace, lookup, global_ping, port_scan, ping_check, related, ipure
+            page, trace, lookup, global_ping, port_scan, ping_check, related, ipure, ipqs
         )
         request_results = {
             "page": page,
@@ -185,6 +201,7 @@ class CoffeeCollector:
             "ping_check": ping_check,
             "related": related,
             "ipure": ipure,
+            "ipqs": ipqs,
         }
         completeness = _completeness(request_results, exit_ip, lookup_data)
         gpt_check = _gpt_check_summary(gpt_requests, lookup_data)
@@ -197,6 +214,7 @@ class CoffeeCollector:
             "ipure_scores": ipure_scores,
             "ipure_report_url": _ipure_field(ipure, "report_url"),
             "gpt_check": gpt_check,
+            **ipqs_source.ipqs_fields(ipqs),
         }
         finished_at = _now()
 
@@ -232,6 +250,7 @@ class CoffeeCollector:
                 "trust_env": False,
                 "ipure_budget_remaining": ipure.get("budget_remaining"),
                 "ipure_via_direct_fallback": bool(ipure.get("direct_fallback")),
+                "ipqs_via_direct_fallback": bool(ipqs.get("direct_fallback")),
             },
             "completeness": completeness,
             "requests": {
@@ -295,6 +314,7 @@ def _completeness(
         "port_scan_recorded": _request_recorded(requests["port_scan"]),
         "ping_check_recorded": _request_recorded(requests["ping_check"]),
         "ipure_recorded": _request_recorded(requests["ipure"]),
+        "ipqs_recorded": _request_recorded(requests["ipqs"]),
         "related_recorded": (
             _request_recorded(requests["related"])
             if lookup_data.get("related_pending") or lookup_data.get("related_domains_pending")
@@ -331,7 +351,7 @@ def _combined_error(*results: dict[str, Any]) -> str | None:
         result.get("error")
         for result in results
         if result.get("error")
-        and (not result.get("skipped") or result.get("target_host") == IPURE_HOST)
+        and (not result.get("skipped") or result.get("target_host") in {IPURE_HOST, IPQS_HOST})
     ]
     return "；".join(dict.fromkeys(errors)) or None
 
