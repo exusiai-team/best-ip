@@ -22,7 +22,7 @@ import { SCENARIO_LABELS } from "./data.js";
 import { comparableScore, ipureScoreInlineStyle } from "./score-color.js";
 
 const STATUS_LABELS = { success: "完整", partial: "部分", failed: "失败" };
-const SOURCE_LABELS = { ipqs: "1ms IPQS", ipure: "IPure", coffee: "Coffee" };
+const SOURCE_LABELS = { who: "1ms who", ipqs: "1ms IPQS", ipure: "IPure", coffee: "Coffee" };
 
 // 1ms 评分的扣分项（done.parts[].k 去掉 p_ 前缀），只用来写 tooltip。
 const IPQS_DEDUCTIONS = {
@@ -31,7 +31,7 @@ const IPQS_DEDUCTIONS = {
 };
 
 /* ------------------------------------------------------------- 取值函数 --- */
-// usage_type → 接入列的词（1ms 多源共识优先，回落 IPure、Coffee，见 network_source）。住宅、移动是「真人上网」的出口，风控最友好，着绿色。
+// usage_type → 接入列的词（1ms IPQS 多源共识优先，回落 IPure、Coffee，见 network_source）。住宅、移动是「真人上网」的出口，风控最友好，着绿色。
 const USAGE_LABELS = {
   residential: "住宅", mobile: "移动", business: "商业", hosting: "机房", education: "教育", government: "政府",
 };
@@ -90,19 +90,21 @@ export const COLUMNS = [
     sortValue: (r) => r.node || null,
     filterValue: (r) => joined(r.node, r.type, STATUS_LABELS[r.status]),
   },
+  // 出口 IP 下面一行是服务器名（PTR 反向解析）：机房 IP 的主机名常直接写着云厂商与机房
+  // （ec2-…ap-northeast-1.compute.amazonaws.com），比 AS 名更快看出「这是谁的机器」。
   {
-    key: "ip", label: "出口 IP", width: "164px", sort: "ip", filter: "text",
-    placeholder: "IP 或前缀",
+    key: "ip", label: "出口 IP / 服务器", width: "184px", sort: "ip", filter: "text",
+    placeholder: "IP/前缀/主机名",
     sortValue: (r) => r.exit_ip || null,
-    filterValue: (r) => r.exit_ip || "",
+    filterValue: (r) => joined(r.exit_ip, r.rdns),
   },
-  // 归属地列只写国家：真实数据里城市常与国家同名（Hong Kong Hong Kong），一列里写两遍不增信息。
-  // 城市、地区、国家代码仍然参与这一列的筛选（输入 JP、Tokyo 都能命中），只是不占列宽。
+  // 国名按国家代码本地化成中文；城市放在次行（与国名相同时不重复）。
+  // 地区、国家代码、上游原文国名仍然参与筛选（输入 JP、Japan、Tokyo 都能命中）。
   {
-    key: "geo", label: "国家和地区", width: "104px", sort: "text", filter: "text",
+    key: "geo", label: "国家和地区", width: "112px", sort: "text", filter: "text",
     placeholder: "国家/城市", suggest: (r) => r.country,
     sortValue: (r) => (r.exit_ip ? r.country : null) || null,
-    filterValue: (r) => (r.exit_ip ? joined(r.country, r.country_code, r.region, r.city) : ""),
+    filterValue: (r) => (r.exit_ip ? joined(r.country, r.country_raw, r.country_code, r.region, r.city) : ""),
   },
   {
     key: "isp", label: "服务商 / ISP", width: "172px", sort: "text", filter: "text",
@@ -129,12 +131,6 @@ export const COLUMNS = [
     filterValue: (r) => r.ipqs_score,
   },
   {
-    key: "coffee", label: "Coffee", width: "72px", align: "center", sort: "num", filter: "num",
-    title: "Coffee 信任评分",
-    sortValue: (r) => (Number.isFinite(r.coffee_score) ? r.coffee_score : null),
-    filterValue: (r) => (Number.isFinite(r.coffee_score) ? r.coffee_score : null),
-  },
-  {
     key: "ipure", label: "IPure", width: "68px", align: "center", sort: "num", filter: "num",
     title: "IPure 纯净度总分",
     // IPure 总分的 -1 是「该地区受限」哨兵，不参与数值比较；null 表示上游没给分。
@@ -148,6 +144,13 @@ export const COLUMNS = [
     sortValue: (r) => comparableScore(scenarioShown(r, scenario) ?? null),
     filterValue: (r) => scenarioShown(r, scenario) ?? null,
   })),
+  // Coffee 只剩信任评分这一项参考，排在最后；归属信息已不再取自 Coffee。
+  {
+    key: "coffee", label: "Coffee", width: "72px", align: "center", sort: "num", filter: "num",
+    title: "Coffee 信任评分", group: "first",
+    sortValue: (r) => (Number.isFinite(r.coffee_score) ? r.coffee_score : null),
+    filterValue: (r) => (Number.isFinite(r.coffee_score) ? r.coffee_score : null),
+  },
 ];
 
 export const COLUMN_BY_KEY = new Map(COLUMNS.map((column) => [column.key, column]));
@@ -354,7 +357,8 @@ function ipCell(document, result) {
   const td = cell(document, "ip", "cell-ip");
   const code = el(document, "code", "ip");
   code.textContent = result.exit_ip;
-  code.title = `出口 IP${result.sources?.ip === "ipure" ? "（IPure 已确认）" : sourceNote(result.sources?.ip)}`;
+  const confirmedBy = { who: "1ms who", ipure: "IPure" }[result.sources?.ip];
+  code.title = `出口 IP${confirmedBy ? `（${confirmedBy} 已确认）` : sourceNote(result.sources?.ip)}`;
 
   const copy = el(document, "button", "copy-btn");
   copy.type = "button";
@@ -364,17 +368,30 @@ function ipCell(document, result) {
   copy.append(copyIcon(document), Object.assign(el(document, "span", "copy-lbl"), { textContent: "复制" }));
 
   td.append(code, copy);
+  if (result.rdns) {
+    const host = quickFilter(el(document, "span", "ip-sub"), "ip", result.rdns);
+    host.textContent = result.rdns;
+    host.title = `服务器名（PTR 反向解析）：${result.rdns}${sourceNote(result.sources?.ip)}`;
+    td.append(host);
+  }
   return td;
 }
 
 function geoCell(document, result) {
   const td = cell(document, "geo", "cell-geo");
-  const text = result.country || "未知";
   const value = quickFilter(el(document, "span", "geo"), "geo", result.country);
-  value.textContent = text;
+  value.textContent = result.country || "未知";
   td.append(value);
-  // 列宽固定、超出省略：裁掉的字与城市只能靠 title 读回来。
-  const detail = [result.country, result.region, result.city].filter((part, index, all) => part && all.indexOf(part) === index);
+  // 次行写城市；城市与国名、上游原文国名相同（香港 / Hong Kong）时不重复。
+  const place = [result.city, result.region].find((part) => part && part !== result.country && part !== result.country_raw);
+  if (place) {
+    const sub = quickFilter(el(document, "span", "geo-sub"), "geo", place);
+    sub.textContent = place;
+    td.append(sub);
+  }
+  // 列宽固定、超出省略：裁掉的字只能靠 title 读回来。
+  const detail = [result.country, result.country_raw, result.region, result.city]
+    .filter((part, index, all) => part && all.indexOf(part) === index);
   td.title = `${detail.join(" · ") || "归属地未知"}${result.country_code ? ` [${result.country_code}]` : ""}${sourceNote(result.sources?.geo)}`;
   return td;
 }
@@ -478,6 +495,7 @@ function ipqsCell(document, result) {
 function coffeeCell(document, result) {
   const td = cell(document, "coffee", "cell-coffee");
   td.dataset.align = "center";
+  td.dataset.group = "first";
   td.append(scorePill(document, {
     kind: "coffee",
     value: Number.isFinite(result.coffee_score) ? result.coffee_score : null,
@@ -570,9 +588,10 @@ export function createRow(result, { position, tier }, document) {
     row.append(absentCell(document, result));
   }
 
-  row.append(ipqsCell(document, result), coffeeCell(document, result), ipureCell(document, result));
+  row.append(ipqsCell(document, result), ipureCell(document, result));
   if (result.exit_ip) SCENARIO_COLUMNS.forEach((column) => row.append(scenarioCell(document, result, column)));
   else row.append(scenarioNoneCell(document, result));
+  row.append(coffeeCell(document, result));
   return row;
 }
 

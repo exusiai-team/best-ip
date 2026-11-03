@@ -33,7 +33,7 @@ from backend.app.results.artifact import (
 from backend.app.results.store import result_store
 from backend.app.scan.errors import _TRANSPORT_ERROR_TYPES
 from backend.app.sources.coffee import _is_same_ip, _trace_ip
-from backend.app.sources.http import IPQS_HOST, IPURE_HOST
+from backend.app.sources.http import IPQS_HOST, IPURE_HOST, WHO_HOST, WHO_ME_URL
 from backend.app.sources.ipqs import ipqs_fields, ipqs_url
 from backend.app.sources.ipure import (
     IPURE_RESTRICTED_LEVEL,
@@ -148,6 +148,27 @@ def _node_ipqs_valid(record: dict[str, Any], ipqs: Any, evidence: dict[str, Any]
         and all(record.get(key) == value for key, value in ipqs_fields(ipqs).items())
         and record.get("ipqs_score") is not None
     )
+
+
+def _node_who_valid(record: dict[str, Any], who: Any, evidence: dict[str, Any]) -> bool:
+    """who has no host-side fallback: any recorded answer must be a proxied one, and a group
+    credited to who must come from an answer for this very exit IP."""
+
+    if not isinstance(who, dict):
+        return False
+    if (
+        who.get("attempted") is not True
+        or who.get("via_mihomo") is not True
+        or who.get("proxy_url") != evidence.get("proxy_url")
+        or who.get("target_host") != WHO_HOST
+        or who.get("url") != WHO_ME_URL
+        or (record.get("completeness") or {}).get("checks", {}).get("who_recorded")
+        is not (who.get("ok") is True)
+    ):
+        return False
+    credited = "who" in (record.get("network_source") or {}).values()
+    data = who.get("data") if isinstance(who.get("data"), dict) else {}
+    return not credited or _is_same_ip(data.get("ip"), record["exit_ip"])
 
 
 def _require_no_failed_nodes(job: dict[str, Any]) -> None:
@@ -501,6 +522,8 @@ async def verify() -> None:
                     raise RuntimeError(
                         f"节点 {index} 1ms IPQS 证据无效：{reason or '响应缺少最终评分'}"
                     )
+                if not _node_who_valid(record, requests.get("who"), evidence):
+                    raise RuntimeError(f"节点 {index} 1ms who 证据无效")
                 completeness = record.get("completeness")
                 checks = completeness.get("checks") if isinstance(completeness, dict) else None
                 if (
@@ -606,6 +629,16 @@ async def verify() -> None:
         print(
             f"1ms IPQS 覆盖：{len(scorable)}/{total} 个节点获得评分，"
             f"其中 {via_proxy} 个经节点代理、{len(scorable) - via_proxy} 个走宿主直连兜底"
+        )
+        sources = [record.get("network_source") or {} for record in scorable]
+        print(
+            f"归属来源：地区 who {sum(s.get('geo') == 'who' for s in sources)} / "
+            f"1ms 共识 {sum(s.get('geo') == 'ipqs' for s in sources)} / "
+            f"IPure {sum(s.get('geo') == 'ipure' for s in sources)}；"
+            f"服务商 who {sum(s.get('isp') == 'who' for s in sources)} / "
+            f"1ms 共识 {sum(s.get('isp') == 'ipqs' for s in sources)} / "
+            f"IPure {sum(s.get('isp') == 'ipure' for s in sources)}"
+            f"（共 {len(scorable)} 个有出口 IP 的节点）"
         )
         _require_no_failed_nodes(job)
         print(

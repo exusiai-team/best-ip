@@ -31,7 +31,7 @@ const SCENARIO_KEYS = ["ai", "social", "streaming", "gaming", "ecommerce", "emai
 const STEP_LABELS = [
   ["page", "Coffee 页面"],
   ["trace", "出口 IP 确认"],
-  ["lookup", "归属查询"],
+  ["lookup", "Coffee 查询"],
   ["ipure", "IPure 评分"],
   ["ipqs", "1ms 评分"],
 ];
@@ -107,14 +107,35 @@ function pairFromLocation(value) {
   return { country: null, city: null };
 }
 
+// 国家代码 → 中文国名。who / 1ms 共识只给代码，IPure 给的是英文名；统一按代码本地化，
+// 整列同一种语言。运行环境没有 Intl.DisplayNames 时退回上游原文。
+const REGION_NAMES = (() => {
+  try {
+    return new Intl.DisplayNames(["zh-CN"], { type: "region" });
+  } catch {
+    return null;
+  }
+})();
+
+function regionName(code) {
+  if (!code || !REGION_NAMES) return null;
+  try {
+    const name = REGION_NAMES.of(code);
+    return name && name !== code ? name : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * 国家 / 城市的优先顺序：归属查询的原始字段 → coffee 页面拿到的同一份归属数据 →
- * 从 location 串派生 → null。
- * 前两个是结构化字段，直接可用；location 是拼给眼睛看的串，只能当最后的兜底。
+ * 国家 / 城市的优先顺序：
+ * - 新产物（带 network_source）：collector 已按「1ms who → 1ms 共识 → IPure」写好顶层字段，
+ *   只认顶层，**不再**回落 Coffee 的归属数据——那正是这次改掉的来源；
+ * - 旧产物：归属查询的原始字段 → coffee 页面拿到的同一份归属数据 → 从 location 串派生 → null。
  */
 function countryCityOf(record) {
-  // 新产物：collector 已按「IPure 优先、缺项回落 Coffee」写好顶层 country / city。
   const top = { country: text(record?.country), city: text(record?.city) };
+  if (record?.network_source && typeof record.network_source === "object") return top;
   if (top.country || top.city) return top;
 
   const fromLookup = pairOf(record?.requests?.lookup?.data);
@@ -130,7 +151,7 @@ function countryCityOf(record) {
   return pairFromLocation(record?.location);
 }
 
-const SOURCES = new Set(["ipqs", "ipure", "coffee"]);
+const SOURCES = new Set(["who", "ipqs", "ipure", "coffee"]);
 const USAGE_TYPES = new Set(["residential", "mobile", "business", "hosting", "education", "government"]);
 
 const IPQS_GRADES = new Set(["A", "B", "C", "D", "F"]);
@@ -165,11 +186,12 @@ function sourcesOf(record) {
   return { ip: null, geo: null, isp: null, kind: null, native: null };
 }
 
-/** 国家代码：两到三位字母才算，统一大写；其余一律 null。 */
+/** 国家代码：两到三位字母才算，统一大写；其余一律 null。新产物只认顶层，不回落 Coffee。 */
 function countryCodeOf(record) {
+  const legacy = !(record?.network_source && typeof record.network_source === "object");
   const raw = text(record?.country_code)
-    || text(record?.requests?.lookup?.data?.countryCode)
-    || text(record?.requests?.lookup?.data?.country_code);
+    || (legacy ? text(record?.requests?.lookup?.data?.countryCode) : null)
+    || (legacy ? text(record?.requests?.lookup?.data?.country_code) : null);
   return raw && /^[A-Za-z]{2,3}$/u.test(raw) ? raw.toUpperCase() : null;
 }
 
@@ -205,7 +227,9 @@ function toRow(record) {
   const status = STATUSES.has(record?.status) ? record.status : "failed";
   const failed = status === "failed";
   const geo = countryCityOf(record);
+  const countryCode = failed ? null : countryCodeOf(record);
   const asn = integer(record?.asn);
+  const rdns = text(record?.rdns);
   // 总分与六项同一取值域：越界小数不能被截成 -1，否则药丸会把它说成「该地区受限」。
   const score = failed ? null : ipureValue(record?.score);
 
@@ -215,13 +239,17 @@ function toRow(record) {
     status,
     // 失败行没有出口 IP：即便记录里残留一个值也不显示，否则「没连上」的行会被伪装成可用节点。
     exit_ip: failed ? null : text(record?.exit_ip),
-    country: geo.country,
-    country_code: failed ? null : countryCodeOf(record),
+    country: regionName(countryCode) || geo.country,
+    // 上游原文（如 IPure 的 "Japan"）留给 title 与筛选：输入英文国名照样命中。
+    country_raw: geo.country,
+    country_code: countryCode,
     region: text(record?.region),
     city: geo.city,
+    // 服务器名（反向解析 PTR）。"-" 是后端「没有」的占位，不当值显示。
+    rdns: rdns && rdns !== "-" ? rdns : null,
     isp: text(record?.isp),
     as_org: text(record?.as_org),
-    // 页面在 title 里写明「这一格来自 IPure / Coffee」，排查数据时不必去翻产物。
+    // 页面在 title 里写明「这一格来自 1ms who / 1ms IPQS / IPure」，排查数据时不必去翻产物。
     sources: sourcesOf(record),
     asn: asn !== null && asn > 0 ? asn : null,
     company_type: text(record?.company_type),

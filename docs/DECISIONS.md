@@ -8,8 +8,10 @@
 - **重试：第 1 次失败后，余下尝试并行跑，谁先成功用谁**，其余取消。连不上的节点从约 18 秒降到约 11 秒；`attempt_count` 只数失败的加胜出的那一次。
 - **节点并发默认 `min(16, max(8, CPU))`**，workflow 里固定 16。交错 A/B：同一窗口 50.9s → 30.4s，可评分节点数不变。并发不影响成功率，坏的网络窗口才影响。
 - **IPure 宿主直连兜底超时 5 秒**（原 20 秒）；退避上限 2 秒。
-- **DNS 引导出口只用全局 IPv4 字面量节点**，按 `(节点序号 + 尝试次数)` 轮换。GitHub runner 没有 IPv6 出口，选中 IPv6 节点会把整次尝试的 DNS 打掉，误报成「域名无法解析」。
-- **Mihomo 开 IPv6**：成功率不变，但失败文案能区分「网络不可达」（环境缺 IPv6 出口）和「域名无法解析」。
+- **DNS 引导出口只用全局 IPv4 字面量节点**，按 `(节点序号 + 尝试次数)` 轮换。DoH 解析器都是 IPv4 字面量，引导出口必须能由本机 IPv4 栈到达；IPv6 出口靠 WARP，不稳时不能让整次尝试的 DNS 跟着倒。
+- **托管 runner 的 IPv6 出口由 Cloudflare WARP 补**（`scripts/warp_ipv6.sh`，scan.yml 里 `continue-on-error`）。runner 自身没有 IPv6 默认路由（actions/runner-images#668，官方 wontfix）；两次正式扫描里按名字可辨的 IPv6 节点 22/22 失败，全是「网络不可达」。每次现注册免费账户、自己生成密钥，只把 `::/0` 接进隧道，IPv4 原样直连。不用 `fscarmen/warp-on-actions`：它写死了一把所有使用者共用的私钥，而且这个 job 有 `id-token: write`，第三方 action 能替我们领订阅。
+- **双栈节点 `ip-version: ipv4-prefer`**（订阅自己写了的照它的来）：IPv6 出口是隧道，多一跳、出口也变了，只留给只有 IPv6 的节点。
+- **不换 sing-box**：两次正式扫描 274 个节点里只有 1 个是「配置不受支持」（vless XHTTP，原版 sing-box 也不支持），其余失败全是连通性问题；换内核预计多不出节点。
 - **Mihomo 就绪 = 控制端口应答且 selector 组已注册**。控制端口先接客、tunnel 后填充，只看 `/version` 会 404 打掉健康节点。
 - **扫描日志一行 `scan_timing`**（只有数字）：产物 1 天后过期，事后靠这一行定位耗时在哪一相。调节点侧参数前先看它。
 
@@ -17,7 +19,8 @@
 
 - **IPure 以官方 `/docs/api` 为准**：`GET /api/lookup?ip=`，不带凭据，六个场景（ai / social / streaming / gaming / ecommerce / email）。
 - **评分取值域 `0..100 ∪ {-1} ∪ {null}`**：`-1` 表示上游标了地区受限，由后端写入，前端不推导，显示成中性灰的 `-1`；`score` 必须等于 `ipure_scores.total`。
-- **归属信息 IPure 优先、按组回落 Coffee**；`network_source` 记录每组来源。`exit_ip` 仍由 Coffee trace 发现（查 IPure 需要先有地址）。
+- **地区、服务商、服务器名以 1ms who 为准，不再回落 Coffee**：who → 1ms IPQS 共识 → IPure；`network_source` 记录每组来源。who 的 `/api/me` 经节点代理问「网站看到的这条连接」，Cloudflare 给国家/地区/城市/ASN/AS 组织，另给 PTR（写进 `rdns`）。它只认调用方，所以没有宿主直连兜底（直连会描述扫描机自己），回显 IP 与 trace 出口不一致（多出口节点）时整组让给按 IP 查询的来源。who 只给国家代码，国名由前端按代码本地化成中文；IPure 的英文国名在代码一致时保留在 `country`。`exit_ip` 仍由 Coffee trace 发现，who 回显一致时记为 who 确认。
+- **表格默认按 1ms 综合分、再按 IPure 总分降序**；Coffee 只剩单一来源的信任分，挪到最后一列。出口 IP 下一行显示服务器名（PTR），国家下一行显示城市。
 - **接入与原生性改由 1ms IPQS 优先**（1ms → IPure → Coffee），并新增一列 1ms 综合评分。1ms 的 `/api/check` 对十余个源投票，比单一来源的判断稳；只读 NDJSON 末尾的 `done` 事件。网页另有两个只在浏览器里跑的源（ipinfo、ipwho），核对过页面代码：它们只给地理、ASN、主机名，不给类型、匿名标记和风险值，因此 `done.score` 就是网页显示的分数。没有在后端复刻 1ms 的聚合算法：那等于长期追一个别人的私有实现，分数还会悄悄漂移。记录只新增 `ipqs_score` / `ipqs_grade` / `ipqs_report_url`，类型与原生性并入已有的 `usage_type` / `is_native`，不另立平行字段。
 - **扫描用的 Mihomo 是域名白名单**（未列出的一律 `MATCH,REJECT`）：新增任何经节点访问的数据源都必须把主机加进 `mihomo.py` 的 `rules`。主机常量从 `sources/http.py` import，不另抄一份。漏掉时请求会全部「成功」地走宿主直连兜底，表面看不出来（1ms 首轮真实验收就是 23/23 直连）；所以兜底成功时也会记下 `requests.ipqs.proxy_error`，`verify_real_scan.py` 会打印经代理与走直连的节点数。
 - **色带复刻 ipure.dev 的五段渐变**，锚点按 Coffee 的亮度带重新取色，保证对比度过 AA。

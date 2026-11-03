@@ -7,6 +7,7 @@ import pytest
 from backend.app.results.validation import ResultStoreError, validate_node
 from backend.app.sources.collector import _network_identity
 from backend.app.sources.ipqs import ipqs_fields, ipqs_url, parse_report
+from backend.app.sources.who import parse_me
 
 IP = "203.0.113.7"
 
@@ -64,7 +65,7 @@ def test_ipqs_wins_kind_and_native_over_ipure_and_coffee():
     ipqs = parse_report(_stream(DONE), ipqs_url(IP))
     ipure = {"usage_type": "residential", "is_residential": True, "is_native": True}
     coffee = {"is_residential": True, "is_native": True, "location": ""}
-    identity = _network_identity(IP, ipure, ipqs, {}, coffee)
+    identity = _network_identity(IP, None, ipure, ipqs, coffee)
     assert identity["usage_type"] == "hosting"
     assert identity["is_datacenter"] is True
     assert identity["is_native"] is False
@@ -75,9 +76,92 @@ def test_ipqs_wins_kind_and_native_over_ipure_and_coffee():
 
 def test_identity_falls_back_to_ipure_without_ipqs():
     ipure = {"usage_type": "residential", "is_residential": True, "is_native": True}
-    identity = _network_identity(IP, ipure, None, {}, {"location": ""})
+    identity = _network_identity(IP, None, ipure, None, {"location": ""})
     assert identity["network_source"]["kind"] == "ipure"
     assert identity["network_source"]["native"] == "ipure"
+
+
+WHO_ME = {
+    "ip": IP,
+    "cf": {"country": "jp", "region": "Tokyo", "city": "Tokyo", "asn": 16509,
+           "asOrganization": "Amazon Data Services Japan", "colo": "NRT"},
+    "h": {"user-agent": "x"},
+    "ptr": "ec2-203-0-113-7.ap-northeast-1.compute.amazonaws.com",
+}
+IPURE_NETWORK = {
+    "ip": IP, "country": "Japan", "country_code": "JP", "region": "Kanto", "city": "Chiyoda",
+    "asn": 16509, "as_name": "Amazon.com, Inc.", "org": "AWS Tokyo",
+}
+
+
+def test_parse_me_keeps_identity_and_drops_echoed_headers():
+    report = parse_me(WHO_ME)
+    assert report["country_code"] == "JP"
+    assert report["asn"] == 16509
+    assert report["ptr"].startswith("ec2-")
+    assert "h" not in report
+    assert parse_me({**WHO_ME, "ip": "not-an-ip"}) is None
+
+
+def test_who_wins_geo_isp_and_rdns_over_ipqs_and_ipure():
+    ipqs = parse_report(_stream({**DONE, "summary": {**DONE["summary"], "asn": 1, "org": "X"}}),
+                        ipqs_url(IP))
+    identity = _network_identity(IP, parse_me(WHO_ME), IPURE_NETWORK, ipqs, {})
+    source = identity["network_source"]
+    assert (source["exit_ip"], source["geo"], source["isp"]) == ("who", "who", "who")
+    assert identity["country_code"] == "JP"
+    assert (identity["region"], identity["city"]) == ("Tokyo", "Tokyo")
+    # 国名只有 IPure 给；国家代码一致时借用。同 ASN 时 AS 组织借用 IPure 清洗过的 AS 名。
+    assert identity["country"] == "Japan"
+    assert identity["location"] == "Japan Tokyo"
+    assert identity["asn"] == 16509
+    assert identity["isp"] == "Amazon Data Services Japan"
+    assert identity["as_org"] == "Amazon.com, Inc."
+    assert identity["rdns"] == WHO_ME["ptr"]
+
+
+def test_who_for_another_ip_is_ignored_and_ipqs_takes_over():
+    ipqs = parse_report(
+        _stream({**DONE, "summary": {**DONE["summary"], "city": "Osaka", "asn": 2516,
+                                     "org": "KDDI", "host": "x.kddi.ne.jp"}}),
+        ipqs_url(IP),
+    )
+    identity = _network_identity(IP, parse_me({**WHO_ME, "ip": "198.51.100.1"}), {}, ipqs, {})
+    source = identity["network_source"]
+    assert (source["exit_ip"], source["geo"], source["isp"]) == ("coffee", "ipqs", "ipqs")
+    assert (identity["country_code"], identity["city"]) == ("JP", "Osaka")
+    assert identity["country"] is None
+    assert (identity["asn"], identity["isp"], identity["rdns"]) == (2516, "KDDI", "x.kddi.ne.jp")
+
+
+def test_identity_never_falls_back_to_coffee_for_geo_or_isp():
+    coffee = {"location": "Coffee Land", "isp": "Coffee ISP", "asn": 1}
+    identity = _network_identity(IP, None, None, None, coffee)
+    source = identity["network_source"]
+    assert (source["geo"], source["isp"]) == (None, None)
+    assert (identity["location"], identity["isp"], identity["asn"]) == ("", "", None)
+
+
+def _with_who(record: dict) -> dict:
+    record["requests"]["who"] = {
+        "ok": True, "via_mihomo": True, "data": parse_me({**WHO_ME, "ip": record["exit_ip"]}),
+    }
+    record["network_source"] = {
+        "exit_ip": "who", "geo": "who", "isp": "who", "kind": None, "native": None,
+    }
+    return record
+
+
+def test_validator_accepts_who_sourced_identity(make_success):
+    record = _with_who(make_success(0))
+    validate_node(record["job_id"], 0, record)
+
+
+def test_validator_rejects_who_source_for_another_ip(make_success):
+    record = _with_who(make_success(0))
+    record["requests"]["who"]["data"]["ip"] = "198.51.100.1"
+    with pytest.raises(ResultStoreError, match="1ms who"):
+        validate_node(record["job_id"], 0, record)
 
 
 def _with_ipqs(record: dict, **fields) -> dict:

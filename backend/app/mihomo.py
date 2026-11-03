@@ -14,7 +14,7 @@ from urllib.parse import quote
 import httpx
 import yaml
 
-from .sources.http import COFFEE_HOST, IPQS_HOST, IPURE_HOST
+from .sources.http import COFFEE_HOST, IPQS_HOST, IPURE_HOST, WHO_HOST
 
 MIHOMO_NOT_READY_MESSAGE = (
     "Mihomo 核心未就绪，请运行 uv run python scripts/download_mihomo.py"
@@ -261,20 +261,23 @@ class MihomoProcess:
             "mode": "rule",
             "log-level": "warning",
             # 出站允许 IPv6：订阅里既有 server 是 IPv6 字面量的节点，也有只有 AAAA 的
-            # 节点域名。GitHub 托管 runner 没有 IPv6 默认路由（只有 ::1 与 eth0 的
-            # fe80::/64），所以这 8 个节点仍然连不上；但关掉开关会把「本环境没有 IPv6
-            # 出口」冒充成节点自身的问题。真要让它们成功，得先给扫描环境一条 IPv6 出口。
+            # 节点域名。GitHub 托管 runner 自身没有 IPv6 出口（runner-images#668），
+            # scan.yml 用 scripts/warp_ipv6.sh 只把 ::/0 接进 Cloudflare WARP 补上这条出口；
+            # WARP 没起来时这些节点照旧报「网络不可达」，而不是被关掉的开关冒充成节点自身的问题。
             "ipv6": True,
             "external-controller": f"127.0.0.1:{self.controller_port}",
             "secret": self.secret,
             "profile": {"store-selected": False, "store-fake-ip": False},
             "dns": self.dns_config,
-            "proxies": self.proxies,
+            # 双栈节点优先走 IPv4：IPv6 出口是 WARP 隧道，多一跳、出口也换了一条，只该留给
+            # 只有 IPv6 的节点。订阅自己写了 ip-version 的照它的来。
+            "proxies": [{"ip-version": "ipv4-prefer", **proxy} for proxy in self.proxies],
             "proxy-groups": proxy_groups,
             "rules": [
                 f"DOMAIN,{COFFEE_HOST},{self.group_name}",
                 f"DOMAIN,{IPURE_HOST},{self.group_name}",
                 f"DOMAIN,{IPQS_HOST},{self.group_name}",
+                f"DOMAIN,{WHO_HOST},{self.group_name}",
                 f"DOMAIN,chatgpt.com,{self.group_name}",
                 f"DOMAIN,api.openai.com,{self.group_name}",
                 "MATCH,REJECT",
