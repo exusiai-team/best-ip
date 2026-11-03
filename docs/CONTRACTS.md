@@ -224,13 +224,27 @@ Anything missing or mistyped is null. The record then fills five groups IPure-fi
 falls back to the Coffee lookup only for a group IPure left empty: geo (`country`,
 `country_code`, `region`, `city`, `location`), ISP (`isp` = `asn.org`, `as_org` = cleaned
 AS name, `asn`), kind (`usage_type`, `is_residential`, `is_datacenter` = hosting), native (`is_native`,
-`native_status`, `native_detail`). `network_source = {exit_ip, geo, isp, kind, native}`
-(each `"ipure"`, `"coffee"` or null) says who supplied each group. `exit_ip` is still
+`native_status`, `native_detail`). Kind and native are decided by 1ms IPQS first (see
+below), then IPure, then Coffee. `network_source = {exit_ip, geo, isp, kind, native}`
+(each `"ipqs"`, `"ipure"`, `"coffee"` or null) says who supplied each group. `exit_ip` is still
 discovered by the Coffee trace (an IPure query needs an address) and is marked `"ipure"`
 when IPure's echoed `ip` equals it. The six new top-level fields are optional — artifacts
 written before them still validate — and the record validator rejects a non-string geo field, a
 `usage_type` outside the six documented values, or a `network_source` with other keys or
 values.
+1ms IPQS (`https://ipqs.1ms.dog/api/check?ip=`) streams NDJSON; only the terminal `done`
+event is read. Its `score` (integer 0..100) is the hard requirement; `grade` (A B C D F),
+consensus `type` (the same six usage values) and `native` follow, and anything off those
+vocabularies becomes null (raw type kept as `requests.ipqs.data.type_raw`). The record
+carries three optional fields: `ipqs_score` (0..100 or null), `ipqs_grade` (never without a
+score) and `ipqs_report_url`; type and native feed the kind/native groups above.
+Deductions, registry country and flags stay in `requests.ipqs.data`. The request goes
+through the node proxy — `ipqs.1ms.dog` must be in the Mihomo domain allowlist, which
+otherwise ends in `MATCH,REJECT` — and may fall back to a recorded host-side query:
+`requests.ipqs.direct_fallback`, `via_mihomo` and `proxy_evidence.ipqs_via_direct_fallback`
+must agree, and a successful fallback keeps the proxy failure in `requests.ipqs.proxy_error`.
+A missing 1ms report makes the node `partial` (`completeness.checks.ipqs_recorded`). None of
+these fields is in the manifest summary, so older manifests still verify.
 Retry metadata, when present, must be internally consistent.
 Required and optional record fields are enforced by Python's ResultStore validator;
 fixtures carry the minimal valid set, not a real enrichment response.

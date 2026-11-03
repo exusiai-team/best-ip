@@ -33,6 +33,7 @@ const STEP_LABELS = [
   ["trace", "出口 IP 确认"],
   ["lookup", "归属查询"],
   ["ipure", "IPure 评分"],
+  ["ipqs", "1ms 评分"],
 ];
 
 /* ------------------------------------------------------------- 值归一化 --- */
@@ -129,8 +130,30 @@ function countryCityOf(record) {
   return pairFromLocation(record?.location);
 }
 
-const SOURCES = new Set(["ipure", "coffee"]);
+const SOURCES = new Set(["ipqs", "ipure", "coffee"]);
 const USAGE_TYPES = new Set(["residential", "mobile", "business", "hosting", "education", "government"]);
+
+const IPQS_GRADES = new Set(["A", "B", "C", "D", "F"]);
+
+/**
+ * 1ms IPQS 评分：记录顶层只有分数、等级与报告地址，扣分明细在请求证据里，只用来写 tooltip。
+ * 分数必须是 0..100 的整数；等级只在有分时才认。
+ */
+function ipqsOf(record) {
+  const raw = record?.ipqs_score;
+  const score = Number.isInteger(raw) && raw >= 0 && raw <= 100 ? raw : null;
+  const deductions = record?.requests?.ipqs?.data?.deductions;
+  return {
+    ipqs_score: score,
+    ipqs_grade: score !== null && IPQS_GRADES.has(record?.ipqs_grade) ? record.ipqs_grade : null,
+    ipqs_report_url: score !== null ? text(record?.ipqs_report_url) : null,
+    ipqs_deductions: Array.isArray(deductions)
+      ? deductions
+        .filter((item) => text(item?.key) && Number.isFinite(item?.points) && item.points > 0)
+        .map((item) => ({ key: item.key, points: Math.round(item.points) }))
+      : [],
+  };
+}
 
 /** 每组取值是谁说的：network_source 只在新产物里有；旧产物一律记为 Coffee（那时只有它）。 */
 function sourcesOf(record) {
@@ -210,6 +233,7 @@ function toRow(record) {
     native_status: text(record?.native_status),
     is_native: triState(record?.is_native),
     coffee_score: failed ? null : integer(record?.coffee_score),
+    ...(failed ? ipqsOf(null) : ipqsOf(record)),
     score,
     // 只有「部分」+ 没分才写明原因：完整却缺分说明上游契约变了，那不该被一句解释掩盖过去。
     score_note: status === "partial" && score === null ? "IPure 未返回纯净度总分" : null,

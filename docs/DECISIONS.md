@@ -17,7 +17,9 @@
 
 - **IPure 以官方 `/docs/api` 为准**：`GET /api/lookup?ip=`，不带凭据，六个场景（ai / social / streaming / gaming / ecommerce / email）。
 - **评分取值域 `0..100 ∪ {-1} ∪ {null}`**：`-1` 表示上游标了地区受限，由后端写入，前端不推导，显示成中性灰的 `-1`；`score` 必须等于 `ipure_scores.total`。
-- **归属信息 IPure 优先、按组回落 Coffee**；`network_source` 记录每组来源，`usage_type` 取 IPure 的六档。`exit_ip` 仍由 Coffee trace 发现（查 IPure 需要先有地址）。
+- **归属信息 IPure 优先、按组回落 Coffee**；`network_source` 记录每组来源。`exit_ip` 仍由 Coffee trace 发现（查 IPure 需要先有地址）。
+- **接入与原生性改由 1ms IPQS 优先**（1ms → IPure → Coffee），并新增一列 1ms 综合评分。1ms 的 `/api/check` 对十余个源投票，比单一来源的判断稳；只读 NDJSON 末尾的 `done` 事件。网页另有两个只在浏览器里跑的源（ipinfo、ipwho），核对过页面代码：它们只给地理、ASN、主机名，不给类型、匿名标记和风险值，因此 `done.score` 就是网页显示的分数。没有在后端复刻 1ms 的聚合算法：那等于长期追一个别人的私有实现，分数还会悄悄漂移。记录只新增 `ipqs_score` / `ipqs_grade` / `ipqs_report_url`，类型与原生性并入已有的 `usage_type` / `is_native`，不另立平行字段。
+- **扫描用的 Mihomo 是域名白名单**（未列出的一律 `MATCH,REJECT`）：新增任何经节点访问的数据源都必须把主机加进 `mihomo.py` 的 `rules`。主机常量从 `sources/http.py` import，不另抄一份。漏掉时请求会全部「成功」地走宿主直连兜底，表面看不出来（1ms 首轮真实验收就是 23/23 直连）；所以兜底成功时也会记下 `requests.ipqs.proxy_error`，`verify_real_scan.py` 会打印经代理与走直连的节点数。
 - **色带复刻 ipure.dev 的五段渐变**，锚点按 Coffee 的亮度带重新取色，保证对比度过 AA。
 
 ## 结果与校验

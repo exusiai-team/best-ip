@@ -601,10 +601,10 @@ code { font-family: var(--font-mono); }
 
 .grid {
   width: 100%;
-  /* 1334px = colgroup 各列宽之和（render.js 的 COLUMNS）。低于这个数浏览器就开始挖列宽，
+  /* 1386px = colgroup 各列宽之和（render.js 的 COLUMNS）。低于这个数浏览器就开始挖列宽，
      表头的列名 + 排序箭头会被挤到折行。所以窄屏宁可横向滚动，也不压缩列宽；
-     1440 视口可用 1392px。场景评分拆成六个 54px 的真列（原先是一列六个 chip，346px）。 */
-  min-width: 1334px;
+     1440 视口可用 1392px。加 1ms 列（72px）时节点列从 260 收到 240 腾出位置。 */
+  min-width: 1386px;
   border-collapse: separate;
   border-spacing: 0;
   font-variant-numeric: tabular-nums;
@@ -881,6 +881,12 @@ select.filter-input {
   font-size: 13px; font-weight: 800; line-height: 1;
   font-variant-numeric: tabular-nums;
 }
+/* 表头统一大写，但「1ms」是站名，大写成「1MS」读不出来。 */
+.grid thead th.col-ipqs { text-transform: none; }
+.score .grade { margin-left: 2px; font-size: 9.5px; font-weight: 800; opacity: 0.75; }
+/* 1ms 评分是出处链接：只加悬停描边，不加下划线，和其余分数药丸长得一样。 */
+a.score { text-decoration: none; cursor: pointer; transition: box-shadow 100ms ease; }
+a.score:hover { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 22%, transparent); }
   /* 四档配色的规则与 .chip-* 合并到上面的「通用药丸」段：两组的 color / background /
      border-color 逐字相同，改一处等于同时改两处。 */
 
@@ -1057,6 +1063,7 @@ select.filter-input {
     --card-gap: clamp(6px, 2vw, 10px);
     --rank-width: 22px;
     --score-width: 38px;
+    --score-slot: 54px;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
@@ -1107,8 +1114,9 @@ select.filter-input {
   }
   .grid .row > td.ident {
     order: 2;
-    /* 首行由排名、名称和两项总分组成；名称吃掉剩余宽度，网络字段从下一行开始。 */
-    flex: 1 1 calc(100% - var(--rank-width) - 2 * var(--score-width) - 3 * var(--card-gap));
+    /* 首行由排名、名称和三项总分组成；名称吃掉剩余宽度，网络字段从下一行开始。
+       每个总分按 --score-slot 预留：1ms 的药丸带等级字母，比 --score-width 宽。 */
+    flex: 1 1 calc(100% - var(--rank-width) - 3 * var(--score-slot) - 4 * var(--card-gap));
     display: block;
     max-width: none;
     padding: 0;
@@ -1124,8 +1132,9 @@ select.filter-input {
   }
   .grid .row > td.ident .ident-sub { white-space: normal; flex-wrap: wrap; }
 
-  /* order 把两个总分提到名字后面：DOM 顺序里它们排在最后（导出与快照都按那个顺序），
+  /* order 把三个总分提到名字后面（1ms 与 Coffee 同为 order 3，按 DOM 次序 1ms 在前）：DOM 顺序里它们排在最后（导出与快照都按那个顺序），
      这里只改视觉次序——榜单第一眼看的就是分数，不该压在卡片底部。 */
+  .grid .row > td.cell-ipqs,
   .grid .row > td.cell-coffee,
   .grid .row > td.cell-ipure {
     flex: 0 0 auto;
@@ -1133,12 +1142,15 @@ select.filter-input {
     align-items: center;
     gap: 3px;
   }
+  .grid .row > td.cell-ipqs,
   .grid .row > td.cell-coffee { order: 3; }
   .grid .row > td.cell-ipure { order: 4; }
   /* 两个分数只差一个数字，卡片里必须标出谁是谁。生成内容只是视觉冗余：
      两个格子的 title 与 data-label 都写着全称。 */
+  .grid .row > td.cell-ipqs::before { content: "1ms"; }
   .grid .row > td.cell-coffee::before { content: "Coffee"; }
   .grid .row > td.cell-ipure::before { content: "IPure"; }
+  .grid .row > td.cell-ipqs::before,
   .grid .row > td.cell-coffee::before,
   .grid .row > td.cell-ipure::before {
     font-size: 10px;
@@ -1148,6 +1160,7 @@ select.filter-input {
     letter-spacing: 0;
     text-transform: none;
   }
+  .grid .row > td.cell-ipqs .score,
   .grid .row > td.cell-coffee .score,
   .grid .row > td.cell-ipure .score {
     min-width: var(--score-width); height: 25px; padding: 0 5px; font-size: 16px;
