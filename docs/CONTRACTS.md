@@ -220,15 +220,25 @@ Network identity is IPure-first. `requests.ipure.data.network` keeps what the
 hosting · education · government · unknown) → `usage_type` (unknown and off-enum values
 become null) + `is_residential` (true only for residential); `nativeType` (native ·
 broadcast · unknown) → `native_type` + `is_native` (true / false / null).
-Anything missing or mistyped is null. The record then fills five groups IPure-first and
-falls back to the Coffee lookup only for a group IPure left empty: geo (`country`,
-`country_code`, `region`, `city`, `location`), ISP (`isp` = `asn.org`, `as_org` = cleaned
-AS name, `asn`), kind (`usage_type`, `is_residential`, `is_datacenter` = hosting), native (`is_native`,
-`native_status`, `native_detail`). Kind and native are decided by 1ms IPQS first (see
-below), then IPure, then Coffee. `network_source = {exit_ip, geo, isp, kind, native}`
-(each `"ipqs"`, `"ipure"`, `"coffee"` or null) says who supplied each group. `exit_ip` is still
-discovered by the Coffee trace (an IPure query needs an address) and is marked `"ipure"`
-when IPure's echoed `ip` equals it. The six new top-level fields are optional — artifacts
+Anything missing or mistyped is null.
+1ms who (`https://who.1ms.dog/api/me`, through the node proxy, no host-side fallback because
+the answer describes the caller) is normalized into `requests.who.data`: `ip` (required),
+`cf.country` → `country_code`, `region`, `city`, `continent`, `timezone`, `asn`,
+`asOrganization` → `as_org`, `colo`, `ptr`; echoed request headers are dropped. Its answer
+is used only when `ip` equals the trace exit IP. The record fills the groups as follows —
+geo (`country_code`, `region`, `city`, `location`): who → 1ms consensus (`summary.cc/city`)
+→ IPure; `country` is IPure's English name only when its code matches, otherwise null (the
+frontend localizes from `country_code`). ISP (`isp`, `as_org`, `asn`): who
+(`asOrganization`; `as_org` borrows IPure's cleaned AS name when the ASN matches) → 1ms
+consensus (`summary.asn/org`) → IPure. `rdns`: who `ptr` → 1ms `summary.host` → `"-"`.
+Kind (`usage_type`, `is_residential`, `is_datacenter` = hosting) and native (`is_native`,
+`native_status`, `native_detail`): 1ms IPQS → IPure → Coffee. Geo and ISP never fall back to
+Coffee. `network_source = {exit_ip, geo, isp, kind, native}` (each `"who"`, `"ipqs"`,
+`"ipure"`, `"coffee"` or null) says who supplied each group; `exit_ip` is discovered by the
+Coffee trace and marked `"who"` / `"ipure"` when that source echoed the same address. Any
+group credited to `"who"` requires `requests.who` with `ok:true`, `via_mihomo:true` and a
+`data.ip` equal to `exit_ip`. A missing who answer makes the node `partial`
+(`completeness.checks.who_recorded`). The identity fields are optional — artifacts
 written before them still validate — and the record validator rejects a non-string geo field, a
 `usage_type` outside the six documented values, or a `network_source` with other keys or
 values.

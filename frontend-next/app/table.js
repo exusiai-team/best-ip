@@ -18,7 +18,8 @@
 const LOCALE = "zh-CN";
 const collator = new Intl.Collator(LOCALE, { numeric: true, sensitivity: "base" });
 
-export const DEFAULT_SORTS = Object.freeze([{ key: "coffee", dir: "desc" }]);
+// 默认先看 1ms 多源综合分，同分再比 IPure 纯净度；Coffee 只剩单一来源的参考分。
+export const DEFAULT_SORTS = Object.freeze([{ key: "ipqs", dir: "desc" }, { key: "ipure", dir: "desc" }]);
 export const STATUSES = ["all", "success", "partial", "failed"];
 
 /* ------------------------------------------------------------ 文本筛选 --- */

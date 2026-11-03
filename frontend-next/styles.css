@@ -838,6 +838,12 @@ select.filter-input {
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
 }
+/* 服务器名（PTR）：次级等宽文本，长主机名截断，全称在 title。 */
+.cell-ip .ip-sub {
+  display: block; max-width: 100%; margin-top: 2px;
+  color: var(--ink-3); font-family: var(--font-mono); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis;
+}
 .copy-btn:hover { background: var(--surface-3); color: var(--ink); border-color: var(--line-2); }
 .copy-btn[data-state="copied"] { color: var(--good); background: var(--good-soft); border-color: var(--good-line); }
 .copy-btn[data-state="error"] { color: var(--danger); background: var(--danger-soft); border-color: var(--danger-line); }
@@ -853,6 +859,8 @@ select.filter-input {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.cell-geo .geo, .cell-geo .geo-sub { display: block; overflow: hidden; text-overflow: ellipsis; }
+.cell-geo .geo-sub { margin-top: 2px; color: var(--ink-3); font-size: 11px; font-weight: 400; }
 
 /* 一键筛选：值本身可点（点了就把这一列筛成它，再点取消）。只给提示，不改版面。 */
 .quick { cursor: pointer; border-radius: var(--radius-xs); }
@@ -1142,9 +1150,9 @@ a.score:hover { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 22%, trans
     align-items: center;
     gap: 3px;
   }
-  .grid .row > td.cell-ipqs,
-  .grid .row > td.cell-coffee { order: 3; }
+  .grid .row > td.cell-ipqs { order: 3; }
   .grid .row > td.cell-ipure { order: 4; }
+  .grid .row > td.cell-coffee { order: 4; }
   /* 两个分数只差一个数字，卡片里必须标出谁是谁。生成内容只是视觉冗余：
      两个格子的 title 与 data-label 都写着全称。 */
   .grid .row > td.cell-ipqs::before { content: "1ms"; }
@@ -1167,8 +1175,9 @@ a.score:hover { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 22%, trans
   }
 
   /* --- 第二行：出口 IP + 归属地 + 接入 + 原生性 --- */
-  .grid .row > td.cell-ip { order: 5; flex: 1 1 auto; gap: 5px; }
+  .grid .row > td.cell-ip { order: 5; flex: 1 1 auto; flex-wrap: wrap; gap: 5px; }
   .grid .row > td.cell-ip .ip { font-size: 12.5px; white-space: normal; }
+  .grid .row > td.cell-ip .ip-sub { flex: 1 1 100%; margin-top: 0; }
   .grid .row > td.cell-geo {
     order: 6;
     flex: 0 1 auto;

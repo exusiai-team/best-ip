@@ -211,6 +211,10 @@ def parse_report(body: str, url: str) -> dict[str, Any] | None:
         "type_raw": raw_type,
         "native": native if isinstance(native, bool) else None,
         "country": _clean_text(summary.get("cc")) or None,
+        "city": _clean_text(summary.get("city")) or None,
+        "asn": summary.get("asn") if _positive_int(summary.get("asn")) else None,
+        "org": _clean_text(summary.get("org")) or None,
+        "host": _clean_text(summary.get("host")) or None,
         "registered_country": _clean_text(summary.get("regCc")) or None,
         "registry_source": _clean_text(summary.get("regFrom")) or None,
         "risk": summary.get("risk") if isinstance(summary.get("risk"), int) else None,
@@ -226,12 +230,16 @@ def parse_report(body: str, url: str) -> dict[str, Any] | None:
     }
 
 
+def _positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 def ipqs_fields(result: dict[str, Any]) -> dict[str, Any]:
     """Flatten a request result into the record's score fields; keys always present.
 
-    Type and native/broadcast are not flattened here: they feed the shared identity chain
-    (`collector._network_identity`, 1ms → IPure → Coffee) and land in `usage_type` /
-    `is_native` with `network_source` saying who decided.
+    Type, native/broadcast and the consensus geo/ASN are not flattened here: they feed the
+    shared identity chain (`collector._network_identity`) and land in `usage_type` /
+    `is_native` / `country` / `asn` with `network_source` saying who decided.
     """
 
     data = result.get("data") if isinstance(result.get("data"), dict) else {}

@@ -321,11 +321,15 @@ def validate_ipure_evidence(evidence: dict[str, Any], requests: dict[str, Any]) 
 
 
 _NETWORK_SOURCE_KEYS = ("exit_ip", "geo", "isp", "kind", "native")
-_NETWORK_SOURCES = {"ipqs", "ipure", "coffee", None}
+_NETWORK_SOURCES = {"who", "ipqs", "ipure", "coffee", None}
 
 
 def validate_network_identity(record: dict[str, Any]) -> None:
-    """IPure-first identity fields are optional (old artifacts lack them) but typed when present."""
+    """Identity fields are optional (old artifacts lack them) but typed when present.
+
+    A group credited to 1ms who must be backed by a proxied who answer for this exit IP:
+    who has no host-side fallback, so anything else would describe the wrong machine.
+    """
 
     for field in ("country", "country_code", "region", "city"):
         value = record.get(field)
@@ -342,6 +346,23 @@ def validate_network_identity(record: dict[str, Any]) -> None:
         or any(source[key] not in _NETWORK_SOURCES for key in _NETWORK_SOURCE_KEYS)
     ):
         raise ResultStoreError("节点记录的 network_source 无效")
+    if "who" in source.values():
+        who = record["requests"].get("who")
+        data = who.get("data") if isinstance(who, dict) else None
+        if (
+            not isinstance(data, dict)
+            or who.get("ok") is not True
+            or who.get("via_mihomo") is not True
+            or not _same_ip(data.get("ip"), record.get("exit_ip"))
+        ):
+            raise ResultStoreError("节点记录的 1ms who 来源缺少经代理的同 IP 证据")
+
+
+def _same_ip(left: Any, right: Any) -> bool:
+    try:
+        return ipaddress.ip_address(left) == ipaddress.ip_address(right)
+    except (TypeError, ValueError):
+        return False
 
 
 def validate_ipqs(record: dict[str, Any]) -> None:

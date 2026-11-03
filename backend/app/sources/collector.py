@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Coroutine
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any
@@ -10,6 +11,7 @@ from urllib.parse import quote
 from . import coffee, gpt_checks
 from . import ipqs as ipqs_source
 from . import ipure as ipure_source
+from . import who as who_source
 from .coffee import (
     _global_ping_summary,
     _global_ping_url,
@@ -32,6 +34,10 @@ from .http import (
     IPURE_HOST,
     IPURE_ORIGIN,
     IPURE_TIMEOUT_SECONDS,
+    WHO_HOST,
+    WHO_ME_URL,
+    WHO_ORIGIN,
+    WHO_TIMEOUT_SECONDS,
     ProxyTransport,
 )
 from .ipure import _ipure_field, _ipure_scores, _ipure_url
@@ -58,7 +64,18 @@ class CoffeeCollector:
         """on_exit_ip：trace 取到出口 IP、开始查 IP 资料的那一刻回调一次（只给实时进度用）。"""
         started_at = _now()
         started = perf_counter()
-        async with self.transport.client() as client:
+        # who 问的是连接本身，不需要先知道出口 IP，与 trace 同时发出。
+        async with (
+            self.transport.client() as client,
+            _background(
+                who_source.request(
+                    self.transport,
+                    client,
+                    WHO_ME_URL,
+                    timeout_seconds=self.transport.deadline(WHO_TIMEOUT_SECONDS),
+                )
+            ) as who_task,
+        ):
             page, trace = await asyncio.gather(
                 coffee.request(
                     self.transport,
@@ -174,6 +191,7 @@ class CoffeeCollector:
                 related = _missing_result("", reason, skipped=True)
                 ipure = _missing_result("", reason, skipped=True)
                 ipqs = _missing_result("", reason, skipped=True)
+            who = await who_task
 
         status = _node_status(
             page,
@@ -186,6 +204,7 @@ class CoffeeCollector:
                 "ping_check": ping_check,
                 "ipure": ipure,
                 "ipqs": ipqs,
+                "who": who,
                 **(
                     {"related": related}
                     if lookup_data.get("related_pending")
@@ -195,8 +214,10 @@ class CoffeeCollector:
             },
         )
         final_exit_ip = exit_ip if status != "failed" else None
+        # 没有出口 IP 时 who 的失败只是同一个连接故障的回声，不再并入失败原因。
         error = _combined_error(
-            page, trace, lookup, global_ping, port_scan, ping_check, related, ipure, ipqs
+            page, trace, lookup, global_ping, port_scan, ping_check, related, ipure, ipqs,
+            *((who,) if exit_ip else ()),
         )
         request_results = {
             "page": page,
@@ -208,6 +229,7 @@ class CoffeeCollector:
             "related": related,
             "ipure": ipure,
             "ipqs": ipqs,
+            "who": who,
         }
         completeness = _completeness(request_results, exit_ip, lookup_data)
         gpt_check = _gpt_check_summary(gpt_requests, lookup_data)
@@ -215,9 +237,9 @@ class CoffeeCollector:
         ipure_scores = _ipure_scores(ipure)
         identity = _network_identity(
             exit_ip if status != "failed" else "",
+            who.get("data"),
             _ipure_field(ipure, "network"),
             ipqs.get("data"),
-            lookup_data,
             coffee_summary,
         )
         summary = {
@@ -261,6 +283,7 @@ class CoffeeCollector:
                 "selection_confirmed": selected_proxy == node_name,
                 "target_origin": COFFEE_ORIGIN,
                 "enrichment_origin": IPURE_ORIGIN,
+                "identity_origin": WHO_ORIGIN,
                 "trust_env": False,
                 "ipure_budget_remaining": ipure.get("budget_remaining"),
                 "ipure_via_direct_fallback": bool(ipure.get("direct_fallback")),
@@ -298,68 +321,111 @@ class CoffeeCollector:
         }
 
 
+@asynccontextmanager
+async def _background(coro: Coroutine[Any, Any, Any]) -> AsyncIterator[asyncio.Task[Any]]:
+    """Run a request alongside the block; never leave it pending when the block exits early."""
+
+    task = asyncio.create_task(coro)
+    try:
+        yield task
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 def _network_identity(
     exit_ip: str,
+    who_data: Any,
     ipure_network: Any,
     ipqs_data: Any,
-    lookup_data: dict[str, Any],
     coffee_summary: dict[str, Any],
 ) -> dict[str, Any]:
-    """出口 IP / 国家和地区 / 服务商：IPure 报告优先，它没说的那一组才回落 Coffee。
+    """出口 IP / 国家和地区 / 服务商 / 服务器名：1ms who 优先，不再回落 Coffee。
 
-    接入与原生性改由 1ms IPQS 的多源共识优先（十余个源投票，比单一来源稳），
-    1ms 没给出结论时依次回落 IPure、Coffee。
+    地区与服务商：who（经节点代理问 Cloudflare 看到的连接本身）→ 1ms IPQS 多源共识 → IPure。
+    who 回显的 ip 必须与 trace 出口一致才采信：多出口节点上两次连接可能走不同地址，
+    那时 who 说的是另一个 IP，整组让给按 IP 查询的来源。
+    服务器名（rdns）：who 的 PTR → 1ms 共识的 host。
+    接入与原生性：1ms IPQS 多源共识 → IPure → Coffee（这两组 who 不提供）。
 
-    出口 IP 仍由 trace 发现（IPure 的查询必须带上一个 IP），IPure 回显的 ip 与之一致时记为
-    「由 IPure 确认」。每一组各自记来源（network_source），页面与审计都能看出这一格是谁说的。
+    出口 IP 仍由 Coffee trace 发现（按 IP 查询的来源都要先有地址），who / IPure 回显一致时
+    记为由它确认。每一组各自记来源（network_source），页面与审计都能看出这一格是谁说的。
     """
 
+    who = who_data if isinstance(who_data, dict) else {}
+    if not (exit_ip and _is_same_ip(who.get("ip"), exit_ip)):
+        who = {}
     network = ipure_network if isinstance(ipure_network, dict) else {}
     ipqs = ipqs_data if isinstance(ipqs_data, dict) else {}
     identity: dict[str, Any] = {}
     source: dict[str, str | None] = {}
 
-    ipure_ip = network.get("ip")
-    source["exit_ip"] = (
-        ("ipure" if ipure_ip and _is_same_ip(ipure_ip, exit_ip) else "coffee") if exit_ip else None
-    )
+    if not exit_ip:
+        source["exit_ip"] = None
+    elif who:
+        source["exit_ip"] = "who"
+    elif network.get("ip") and _is_same_ip(network.get("ip"), exit_ip):
+        source["exit_ip"] = "ipure"
+    else:
+        source["exit_ip"] = "coffee"
 
-    # 地区组：国名或国家代码任一在，就整组用 IPure。
-    coffee_code = _clean_text(lookup_data.get("countryCode") or lookup_data.get("country_code"))
-    if network.get("country") or network.get("country_code"):
+    # 地区组：国家代码在哪个来源，整组就用哪个来源。国名只有 IPure 给，代码一致时借用；
+    # 否则留空，页面按国家代码本地化显示。
+    if who.get("country_code"):
+        source["geo"] = "who"
+        geo = {
+            "country_code": who["country_code"],
+            "region": who.get("region"),
+            "city": who.get("city"),
+        }
+    elif ipqs.get("country"):
+        source["geo"] = "ipqs"
+        geo = {"country_code": ipqs["country"].upper(), "region": None, "city": ipqs.get("city")}
+    elif network.get("country") or network.get("country_code"):
         source["geo"] = "ipure"
         geo = {
-            "country": network.get("country") or _clean_text(lookup_data.get("country")) or None,
-            "country_code": network.get("country_code") or coffee_code.upper() or None,
+            "country_code": network.get("country_code"),
             "region": network.get("region"),
             "city": network.get("city"),
         }
     else:
-        geo = {
-            "country": _clean_text(lookup_data.get("country")) or None,
-            "country_code": coffee_code.upper() or None,
-            "region": _clean_text(lookup_data.get("region")) or None,
-            "city": _clean_text(lookup_data.get("city")) or None,
-        }
-        source["geo"] = "coffee" if geo["country"] or geo["country_code"] else None
+        source["geo"] = None
+        geo = {"country_code": None, "region": None, "city": None}
+    ipure_code = _clean_text(network.get("country_code")).upper()
+    same_country = source["geo"] == "ipure" or ipure_code == geo["country_code"]
+    geo["country"] = network.get("country") if network.get("country") and same_country else None
     identity.update(geo)
-    identity["location"] = (
-        " ".join(part for part in (geo["country"], geo["region"], geo["city"]) if part)
-        if source["geo"] == "ipure"
-        else coffee_summary.get("location", "")
-    )
+    parts = (geo["country"] or geo["country_code"], geo["region"], geo["city"])
+    identity["location"] = " ".join(part for part in dict.fromkeys(parts) if part)
 
-    # 服务商组：ISP 显示 asn.org（最贴近「谁在运营这段地址」），AS 组织显示清洗过的 AS 名。
+    # 服务商组：ISP 显示运营这段地址的组织，AS 组织显示 AS 名；ASN 相同时借用 IPure 清洗过的 AS 名。
     ipure_isp = network.get("org") or network.get("as_name") or network.get("registry_org")
-    if ipure_isp or network.get("asn"):
-        source["isp"] = "ipure"
-        identity["isp"] = ipure_isp or coffee_summary.get("isp") or ""
+    ipure_as_name = network.get("as_name") or network.get("registry_org") or ipure_isp
+    if who.get("asn") or who.get("as_org"):
+        source["isp"] = "who"
+        identity["asn"] = who.get("asn")
+        identity["isp"] = who.get("as_org") or ""
         identity["as_org"] = (
-            network.get("as_name") or network.get("registry_org") or ipure_isp or ""
+            ipure_as_name
+            if ipure_as_name and who.get("asn") and network.get("asn") == who.get("asn")
+            else who.get("as_org") or ""
         )
-        identity["asn"] = network.get("asn") or coffee_summary.get("asn")
+    elif ipqs.get("asn") or ipqs.get("org"):
+        source["isp"] = "ipqs"
+        identity["asn"] = ipqs.get("asn")
+        identity["isp"] = ipqs.get("org") or ""
+        identity["as_org"] = ipqs.get("org") or ""
+    elif ipure_isp or network.get("asn"):
+        source["isp"] = "ipure"
+        identity["asn"] = network.get("asn")
+        identity["isp"] = ipure_isp or ""
+        identity["as_org"] = ipure_as_name or ""
     else:
-        source["isp"] = "coffee" if coffee_summary.get("isp") or coffee_summary.get("asn") else None
+        source["isp"] = None
+        identity.update(asn=None, isp="", as_org="")
+
+    identity["rdns"] = who.get("ptr") or ipqs.get("host") or "-"
 
     # 接入：六档（住宅 / 移动 / 商业 / 机房 / 教育 / 政府），1ms → IPure → Coffee。
     if ipqs.get("type"):
@@ -443,6 +509,7 @@ def _completeness(
         "ping_check_recorded": _request_recorded(requests["ping_check"]),
         "ipure_recorded": _request_recorded(requests["ipure"]),
         "ipqs_recorded": _request_recorded(requests["ipqs"]),
+        "who_recorded": _request_recorded(requests["who"]),
         "related_recorded": (
             _request_recorded(requests["related"])
             if lookup_data.get("related_pending") or lookup_data.get("related_domains_pending")
@@ -474,12 +541,15 @@ def _request_recorded(result: dict[str, Any]) -> bool:
     )
 
 
+_ENRICHMENT_HOSTS = frozenset({IPURE_HOST, IPQS_HOST, WHO_HOST})
+
+
 def _combined_error(*results: dict[str, Any]) -> str | None:
     errors = [
         result.get("error")
         for result in results
         if result.get("error")
-        and (not result.get("skipped") or result.get("target_host") in {IPURE_HOST, IPQS_HOST})
+        and (not result.get("skipped") or result.get("target_host") in _ENRICHMENT_HOSTS)
     ]
     return "；".join(dict.fromkeys(errors)) or None
 

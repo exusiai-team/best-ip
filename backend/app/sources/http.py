@@ -20,6 +20,11 @@ IPQS_HOST = "ipqs.1ms.dog"
 IPQS_ORIGIN = f"https://{IPQS_HOST}"
 IPQS_TIMEOUT_SECONDS = 20.0
 IPQS_MAX_RESPONSE_BYTES = 256_000
+WHO_HOST = "who.1ms.dog"
+WHO_ORIGIN = f"https://{WHO_HOST}"
+WHO_ME_URL = f"{WHO_ORIGIN}/api/me"
+WHO_TIMEOUT_SECONDS = 10.0
+WHO_MAX_RESPONSE_BYTES = 64_000
 GPT_PROBE_TARGETS = [
     {"name": "chatgpt.com", "url": "https://chatgpt.com/cdn-cgi/trace"},
     {"name": "api.openai.com", "url": "https://api.openai.com/v1/models"},
@@ -230,6 +235,11 @@ def _validate_ipure_url(url: str) -> None:
         ipaddress.ip_address(value)
     except ValueError as exc:
         raise ValueError(f"IPure IP 参数无效：{url}") from exc
+
+
+def _validate_who_url(url: str) -> None:
+    if url != WHO_ME_URL:
+        raise ValueError(f"拒绝未允许的 1ms who 请求：{url}")
 
 
 def _validate_ipqs_url(url: str) -> None:
