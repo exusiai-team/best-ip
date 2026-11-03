@@ -2,10 +2,10 @@
    前端契约门禁（frontend-next）
    运行：node scripts/check_frontend_contracts.mjs（由 npm run check 串起）
    ----------------------------------------------------------------------------
-   这里守的四条约定原先只写在笔记与源码注释里，靠人记住：
+   这里守的四条约定原先只写在设计记录与源码注释里，靠人记住：
 
      a. frontend-next 源码里不得出现**标记形式**的 `style=` 属性；
-     b. frontend-next/index.html 的 <thead>…</thead> 区间内零控件（input/select/button）；
+     b. frontend-next/index.html 的 <thead>…</thead> 区间内零控件（表头只由 app/render.js 生成）；
      c. frontend-next/index.html 不得有内联 <script>（只允许带 src 的）；
      d. frontend-next/app/ 下除 app/net.js 外不得出现裸 `fetch(`。
 
@@ -179,8 +179,9 @@ function checkMarkupStyles() {
 
 /* ============================== 契约 b ==================================== */
 
-// 表头里零控件：单视图设计把「全部输入控件」收在顶部条，表头只放排序文案，
-// 表格里再塞控件就会在窄屏折叠时和 data-label 打架（见 render.js 的 COLUMNS）。
+// 静态 HTML 的表头里零控件：表头（可点击排序的列名 + 逐列筛选行）只由 app/render.js 按
+// COLUMNS 生成，index.html 里再手写一份控件就会和 COLUMNS 漂移（列宽、data-label、筛选取值
+// 三处各说各的）。2026-10-08 起表头确实有控件了，但它们只能来自 render.js。
 // 找不到 <thead> 时按通过处理并打印说明——那时这条断言无对象（如实报，不假装检查过）。
 const THEAD_CONTROL = /<(?:input|select|button)\b/giu;
 
@@ -201,7 +202,7 @@ function checkHeadHasNoControls() {
       contract: "表头（<thead>）内出现控件",
       file: INDEX_HTML,
       line: lineOf(masked, index),
-      fix: "把控件移出 <thead>（顶部条或 <tbody> 内），表头只留排序/筛选文案与 aria-sort。",
+      fix: "表头控件改由 app/render.js 的 createHead() 按 COLUMNS 生成，index.html 的 <thead> 保持为空。",
       excerpt: lineTextAt(raw, index),
     });
   }

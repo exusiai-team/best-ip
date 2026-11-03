@@ -12,37 +12,24 @@ from .validation import (
     encode_json,
     node_filename,
     summary,
-    validate_exit_ip,
     validate_manifest,
-    validate_node,
 )
 
 
 def build_manifest(
     job_id: str, job: dict[str, Any], records: list[dict[str, Any]], node_bytes: list[bytes]
 ) -> dict[str, Any]:
+    """只负责汇总；所有校验集中在末尾的 validate_manifest（与发布前 build_artifact 同一道门）。"""
+
     expected_total = job.get("total")
     entries = []
-    success = partial = failed = complete = 0
+    counts = {"success": 0, "partial": 0, "failed": 0, "complete": 0}
     for index, record in enumerate(records):
-        if record.get("node_index") != index or record.get("job_id") != job_id:
-            raise ResultStoreError(f"节点 {index} 暂存记录身份不匹配")
         status = record.get("status")
-        if status == "success":
-            validate_exit_ip(record.get("exit_ip"))
-            success += 1
-        elif status == "partial":
-            validate_exit_ip(record.get("exit_ip"))
-            partial += 1
-        elif status == "failed":
-            if record.get("exit_ip") is not None:
-                raise ResultStoreError(f"失败节点 {index} 含有出口 IP")
-            failed += 1
-        else:
-            raise ResultStoreError(f"节点 {index} 状态无效")
+        if status in counts:
+            counts[status] += 1
         if (record.get("completeness") or {}).get("complete") is True:
-            complete += 1
-        validate_node(job_id, index, record)
+            counts["complete"] += 1
         raw = node_bytes[index]
         entries.append(
             {
@@ -66,12 +53,7 @@ def build_manifest(
         "all_records_present": True,
         "complete": True,
         "execution_mode": job.get("execution_mode", "sequential"),
-        "counts": {
-            "success": success,
-            "partial": partial,
-            "failed": failed,
-            "complete": complete,
-        },
+        "counts": counts,
         "records": entries,
     }
     validate_manifest(job_id, manifest, records, node_bytes)

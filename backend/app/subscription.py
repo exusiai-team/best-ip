@@ -14,7 +14,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 import yaml
 
-RELAY_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{16,512}")
+RELAY_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_.-]{16,512}")
 RELAY_ERROR_REASONS = {
     401: "relay_unauthorized",
     413: "relay_response_too_large",

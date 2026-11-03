@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 from time import perf_counter
 from typing import Any
 from urllib.parse import urlencode
@@ -130,9 +131,7 @@ async def request(
             error_type="ResponseTooLarge",
         )
     except _IPURE_TRANSIENT_ERRORS:
-        fallback = await _direct_report(
-            transport.proxy_url, url, timeout_seconds=timeout_seconds
-        )
+        fallback = await _direct_report(transport.proxy_url, url, timeout_seconds=timeout_seconds)
         if fallback is not None:
             return fallback
         return _ipure_request_result(
@@ -346,6 +345,91 @@ def _parse_ipure_report(payload: Any) -> dict[str, Any] | None:
         ),
         "scenario_note": _clean_text(payload.get("scenarioNote")) or None,
         "report_url": _clean_text(payload.get("reportUrl")) or None,
+        "network": _parse_ipure_network(payload),
+    }
+
+
+# 报告里关于这个 IP 本身的描述（2026-10 实测 8.8.8.8 的 /api/lookup 响应）：
+#   ip                                  回显的被查 IP
+#   geo.country / geo.countryName       国家代码（"US"）/ 国名（"United States"）；region / city
+#   asn.asn / asn.name / asn.org        AS 号 / AS 名（"GOOGLE - Google LLC, US"）/
+#                                       组织（"Google Public DNS"）
+#   registry.org / registry.country     RIR 登记的持有者与登记国
+#   usageType                           residential · mobile · business · hosting · education ·
+#                                       government · unknown（官方 /docs/api 枚举）
+#   nativeType                          native · broadcast（注册地与使用地不一致）· unknown
+# 字段缺失或类型不对一律记 None，由 collector 回落到 Coffee。
+_AS_NAME = re.compile(r"^\S+\s+-\s+(.+?)(?:,\s*[A-Z]{2})?$")
+# 枚举外的取值与 unknown 一律当没说，由 Coffee 补。
+IPURE_USAGE_TYPES = ("residential", "mobile", "business", "hosting", "education", "government")
+_NATIVE_TYPES = {"native": True, "broadcast": False}
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _text_or_none(value: Any) -> str | None:
+    return _clean_text(value) or None if isinstance(value, str) else None
+
+
+def _as_name(value: Any) -> str | None:
+    """ "GOOGLE - Google LLC, US" → "Google LLC"；不是这个形状就原样返回（去掉末尾国家代码）。"""
+
+    text = _text_or_none(value)
+    if not text:
+        return None
+    match = _AS_NAME.match(text)
+    if match:
+        return match.group(1).strip() or text
+    return re.sub(r",\s*[A-Z]{2}$", "", text) or text
+
+
+def _parse_ipure_network(payload: dict[str, Any]) -> dict[str, Any]:
+    """Pull the exit IP's identity out of one /api/lookup report; nothing is guessed."""
+
+    geo = _dict(payload.get("geo"))
+    asn_info = _dict(payload.get("asn"))
+    registry = _dict(payload.get("registry"))
+
+    ip_text = _text_or_none(payload.get("ip"))
+    try:
+        ip = str(ipaddress.ip_address(ip_text)) if ip_text else None
+    except ValueError:
+        ip = None
+
+    code = _text_or_none(geo.get("country"))
+    country_code = code.upper() if code and re.fullmatch(r"[A-Za-z]{2}", code) else None
+
+    asn = asn_info.get("asn")
+    asn = (
+        asn
+        if isinstance(asn, int) and not isinstance(asn, bool) and 0 < asn <= 4_294_967_295
+        else None
+    )
+
+    usage = (_text_or_none(payload.get("usageType")) or "").lower()
+    usage = usage if usage in IPURE_USAGE_TYPES else ""
+    native = (_text_or_none(payload.get("nativeType")) or "").lower()
+    native = native if native in _NATIVE_TYPES else ""
+    registered = _text_or_none(registry.get("country"))
+
+    return {
+        "ip": ip,
+        "country": _text_or_none(geo.get("countryName")),
+        "country_code": country_code,
+        "region": _text_or_none(geo.get("region")),
+        "city": _text_or_none(geo.get("city")),
+        "asn": asn,
+        "as_name": _as_name(asn_info.get("name")),
+        "org": _text_or_none(asn_info.get("org")),
+        "registry_org": _text_or_none(registry.get("org")),
+        "registered_country": registered.upper() if registered else None,
+        "usage_type": usage or None,
+        # 「住宅」是 usageType 里的一档：residential 为 true，其余已知档位（含 mobile）为 false。
+        "is_residential": (usage == "residential") if usage else None,
+        "native_type": native or None,
+        "is_native": _NATIVE_TYPES.get(native),
     }
 
 
@@ -361,9 +445,7 @@ def _ipure_scores(result: dict[str, Any]) -> dict[str, int | None]:
     """Flatten a report into the node record's score map; every key is always present."""
 
     data = result.get("data") if isinstance(result.get("data"), dict) else None
-    scores: dict[str, int | None] = {
-        key: None for key in ("total", *IPURE_SCENARIOS)
-    }
+    scores: dict[str, int | None] = {key: None for key in ("total", *IPURE_SCENARIOS)}
     if data is None:
         return scores
     scores["total"] = _ipure_score(data.get("total"), data.get("level"))

@@ -19,7 +19,6 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-MIHOMO_TAG = "v1.19.30"
 LOCAL_HOST = "127.0.0.1"
 DEFAULT_API_PORT = 8000
 DEFAULT_FRONTEND_PORT = 5173
@@ -92,13 +91,11 @@ def _ensure_mihomo() -> Path:
         return path
     if configured:
         raise SystemExit(f"BEST_IP_MIHOMO_PATH 指向的文件不存在：{path}")
-    print(f"首次启动：正在安装 Mihomo {MIHOMO_TAG} ...", flush=True)
+    print("首次启动：正在安装最新版 Mihomo ...", flush=True)
     result = subprocess.run(
         [
             sys.executable,
             str(ROOT_DIR / "scripts" / "download_mihomo.py"),
-            "--tag",
-            MIHOMO_TAG,
         ],
         cwd=ROOT_DIR,
         check=False,

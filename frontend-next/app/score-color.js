@@ -1,11 +1,7 @@
 /* ============================================================================
-   IPure 分数色带 —— 逐字移植自 frontend/src/results.js（分段、插值、通道值都不改）
+   IPure 分数色带（逐字移植自旧前端 frontend/src/results.js，分段、插值、通道值都不改）
    ----------------------------------------------------------------------------
-   为什么移植而不是 import：
-   本轮新前端是隔离的静态示例，不引入旧前端的运行时依赖；色带是唯一需要共用真值的
-   东西（同一个分数在旧版表格、旧版详情卡、新版列表里必须同色），因此把这段拷贝过来
-   并在此声明来源。旧版改了色带配方，这里必须同步——这条依赖写在
-   .agents/notes 的对应笔记里。
+   旧前端已删除，这里是唯一实现。
 
    移植时只保留页面真正用到的三个入口：channels / color / inlineStyle。
    ========================================================================== */
@@ -70,11 +66,6 @@ export function ipureScoreChannels(score, theme = DEFAULT_THEME) {
       Math.round(channel + (highChannels[channelIndex] - channel) * ratio));
   }
   return null;
-}
-
-export function ipureScoreColor(score, theme = DEFAULT_THEME) {
-  const channels = ipureScoreChannels(score, theme);
-  return channels ? `rgb(${channels.join(" ")})` : null;
 }
 
 // 只写入两组通道（--sc-l / --sc-d），不写具体颜色：选哪一套、前景/描边/底色各占多少

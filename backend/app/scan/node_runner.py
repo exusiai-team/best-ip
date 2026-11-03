@@ -4,6 +4,7 @@ import asyncio
 import ipaddress
 import shutil
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -20,6 +21,27 @@ from .errors import (
     classify_error,
 )
 from .models import NodeOutcome, NodeRecord
+
+# 实时进度的回调：(阶段, 第几次尝试, 上一次失败的原因)。阶段只有 start / connect / lookup / retry，
+# 只给 runner → Worker 的进度回报用，不进产物。
+StageCallback = Callable[[str, int, str | None], None]
+
+
+@dataclass(slots=True)
+class _Attempt:
+    number: int
+    result: NodeRecord
+    failure: ScanError | None
+    mihomo: MihomoProcess | None
+    dns_bootstrap_proxy: str | None
+
+    @property
+    def failed(self) -> bool:
+        return self.result.get("status") == "failed"
+
+    @property
+    def retryable(self) -> bool:
+        return self.failure is None or self.failure.retryable
 
 
 class NodeRunner:
@@ -44,133 +66,60 @@ class NodeRunner:
         index: int,
         dns_bootstrap_candidates: list[str],
         outbound_interface: str | None,
-        on_attempt: Callable[[int], None] | None = None,
+        on_stage: StageCallback | None = None,
     ) -> NodeOutcome:
+        """检测一个节点：先试一次；失败且值得重试时，余下的尝试**并行**跑，谁先成功用谁。
+
+        为什么并行：永久连不上的节点每次尝试都要吃满 Mihomo 的 5 秒拨号超时，三次串行加退避约
+        18 秒，整轮扫描的长尾就是这几个节点（见 docs/DECISIONS.md「扫描核心」）。
+        第 2、3 次尝试本来就各用各的 DNS 引导出口、各起一个 Mihomo，彼此不依赖；并行之后
+        这条长尾约 11 秒。判定口径不变：最多 max_node_attempts 次、取第一份非失败记录、
+        全部失败时用编号最大的那次失败作终态。
+        """
+
         phase_ms: dict[str, int] = {}
-        failure: ScanError | None = None
-        node_name = str(proxy["name"])
-        node_type = str(proxy["type"])
-        attempt_errors: list[str] = []
-        result: NodeRecord | None = None
-        final_mihomo: MihomoProcess | None = None
-        attempts_used = 0
-        last_dns_bootstrap_proxy: str | None = None
         proxy_by_name = {str(candidate.get("name") or ""): candidate for candidate in proxies}
 
-        for attempt in range(1, self.settings.max_node_attempts + 1):
-            attempts_used = attempt
-            mihomo: MihomoProcess | None = None
-            log_offset = 0
-            failure_phase = "start"
-            failure = None
-            try:
-                dns_bootstrap_proxy = _dns_bootstrap_for_attempt(
-                    proxy,
-                    dns_bootstrap_candidates,
-                    proxy_by_name=proxy_by_name,
-                    node_index=index,
-                    attempt=attempt,
-                )
-                last_dns_bootstrap_proxy = dns_bootstrap_proxy
-                attempt_proxies = _attempt_proxies(
-                    proxy,
-                    proxy_by_name,
-                    dns_bootstrap_proxy=dns_bootstrap_proxy,
-                )
-                mihomo = self.mihomo_factory(
-                    self.settings.mihomo_path,
-                    work_dir / f"node-{index:04d}-attempt-{attempt:02d}",
-                    attempt_proxies,
-                    selector_names=[node_name],
-                    outbound_interface=outbound_interface,
-                    dns_bootstrap_proxy=dns_bootstrap_proxy,
-                )
-                final_mihomo = mihomo
-                if on_attempt:
-                    on_attempt(attempt)
-                phase_started = perf_counter()
-                try:
-                    await mihomo.start()
-                finally:
-                    _record_phase(phase_ms, "start", phase_started)
-                log_offset = mihomo.log_offset()
-                failure_phase = "selector"
-                phase_started = perf_counter()
-                try:
-                    selected = await mihomo.select(node_name)
-                    if selected != node_name:
-                        raise MihomoError("切换节点后未确认 selector 身份")
-                finally:
-                    _record_phase(phase_ms, "select", phase_started)
-                failure_phase = "collector"
-                collector = self.collector_factory(
-                    mihomo.proxy_url,
-                    timeout_ms=self.settings.page_timeout_ms,
-                )
-                phase_started = perf_counter()
-                try:
-                    result = await asyncio.wait_for(
-                        collector.collect(
-                            job_id=job_id,
-                            node_index=index,
-                            node_name=node_name,
-                            node_type=node_type,
-                            selected_proxy=selected,
-                            mihomo_instance=mihomo.instance_id,
-                        ),
-                        timeout=self.settings.page_timeout_ms / 1000,
-                    )
-                finally:
-                    _record_phase(phase_ms, "collect", phase_started)
-                _attach_mihomo_error(result, mihomo, log_offset)
-            except asyncio.CancelledError:
-                raise
-            except MihomoNotReadyError:
-                raise
-            except MihomoStopError:
-                raise
-            except Exception as exc:
-                failure = classify_error(exc, phase=failure_phase)
-                mihomo_error = _read_mihomo_error(mihomo, log_offset) if mihomo else ""
-                result = _failed_node(
-                    job_id,
-                    index,
-                    node_name,
-                    node_type,
-                    exc,
-                    phase=failure_phase,
-                    mihomo_error=mihomo_error,
-                    mihomo=mihomo,
-                )
-            finally:
-                if mihomo:
-                    phase_started = perf_counter()
-                    try:
-                        await _cleanup_mihomo(mihomo, work_dir)
-                    finally:
-                        _record_phase(phase_ms, "stop", phase_started)
+        def attempt(number: int) -> Any:
+            return self._attempt(
+                job_id=job_id,
+                work_dir=work_dir,
+                proxy=proxy,
+                proxy_by_name=proxy_by_name,
+                index=index,
+                number=number,
+                dns_bootstrap_candidates=dns_bootstrap_candidates,
+                outbound_interface=outbound_interface,
+                phase_ms=phase_ms,
+                on_stage=on_stage,
+            )
 
-            if result.get("status") != "failed":
-                break
-            attempt_errors.append(_attempt_error(result))
-            if (
-                failure is not None and not failure.retryable
-            ) or attempt >= self.settings.max_node_attempts:
-                break
+        first = await attempt(1)
+        failures = [first] if first.failed else []
+        chosen = None if first.failed else first
+        max_attempts = self.settings.max_node_attempts
+        if chosen is None and first.retryable and max_attempts > 1:
+            if on_stage:
+                on_stage("retry", 2, _attempt_error(first.result))
             if self.settings.node_retry_backoff_ms:
-                await asyncio.sleep(self.settings.node_retry_backoff_ms * attempt / 1000)
+                await asyncio.sleep(self.settings.node_retry_backoff_ms / 1000)
+            chosen = await _first_success(
+                [attempt(number) for number in range(2, max_attempts + 1)], failures
+            )
 
-        if result is None:
-            raise RuntimeError("节点扫描没有产生终态记录")
+        failures.sort(key=lambda item: item.number)
+        final = chosen or failures[-1]
+        result = final.result
         _attach_attempt_evidence(
             result,
-            attempts_used=attempts_used,
-            max_attempts=self.settings.max_node_attempts,
-            attempt_errors=attempt_errors,
-            mihomo=final_mihomo,
+            attempts_used=len(failures) + (1 if chosen else 0),
+            max_attempts=max_attempts,
+            attempt_errors=[_attempt_error(item.result) for item in failures],
+            mihomo=final.mihomo,
             outbound_interface=outbound_interface,
-            dns_bootstrap_proxy=last_dns_bootstrap_proxy,
+            dns_bootstrap_proxy=final.dns_bootstrap_proxy,
         )
+        failure = final.failure
         if result.get("status") == "success":
             failure = None
         elif failure is None:
@@ -181,6 +130,150 @@ class NodeRunner:
                 "节点传输连接失败" if result.get("status") == "failed" else "节点采集不完整",
             )
         return NodeOutcome(result, phase_ms, failure)
+
+    async def _attempt(
+        self,
+        *,
+        job_id: str,
+        work_dir: Path,
+        proxy: dict[str, Any],
+        proxy_by_name: dict[str, dict[str, Any]],
+        index: int,
+        number: int,
+        dns_bootstrap_candidates: list[str],
+        outbound_interface: str | None,
+        phase_ms: dict[str, int],
+        on_stage: StageCallback | None,
+    ) -> _Attempt:
+        """一次尝试：独立的 Mihomo 进程与工作目录，结束时（含被取消）确认清理。"""
+
+        node_name = str(proxy["name"])
+        node_type = str(proxy["type"])
+        mihomo: MihomoProcess | None = None
+        dns_bootstrap_proxy: str | None = None
+        log_offset = 0
+        failure_phase = "start"
+        failure: ScanError | None = None
+        result: NodeRecord
+        try:
+            dns_bootstrap_proxy = _dns_bootstrap_for_attempt(
+                proxy,
+                dns_bootstrap_candidates,
+                proxy_by_name=proxy_by_name,
+                node_index=index,
+                attempt=number,
+            )
+            attempt_proxies = _attempt_proxies(
+                proxy,
+                proxy_by_name,
+                dns_bootstrap_proxy=dns_bootstrap_proxy,
+            )
+            mihomo = self.mihomo_factory(
+                self.settings.mihomo_path,
+                work_dir / f"node-{index:04d}-attempt-{number:02d}",
+                attempt_proxies,
+                selector_names=[node_name],
+                outbound_interface=outbound_interface,
+                dns_bootstrap_proxy=dns_bootstrap_proxy,
+            )
+            if on_stage:
+                on_stage("start", number, None)
+            phase_started = perf_counter()
+            try:
+                await mihomo.start()
+            finally:
+                _record_phase(phase_ms, "start", phase_started)
+            log_offset = mihomo.log_offset()
+            failure_phase = "selector"
+            phase_started = perf_counter()
+            try:
+                selected = await mihomo.select(node_name)
+                if selected != node_name:
+                    raise MihomoError("切换节点后未确认 selector 身份")
+            finally:
+                _record_phase(phase_ms, "select", phase_started)
+            failure_phase = "collector"
+            collector = self.collector_factory(
+                mihomo.proxy_url,
+                timeout_ms=self.settings.page_timeout_ms,
+            )
+            if on_stage:
+                on_stage("connect", number, None)
+            phase_started = perf_counter()
+            try:
+                result = await asyncio.wait_for(
+                    collector.collect(
+                        job_id=job_id,
+                        node_index=index,
+                        node_name=node_name,
+                        node_type=node_type,
+                        selected_proxy=selected,
+                        mihomo_instance=mihomo.instance_id,
+                        on_exit_ip=(
+                            (lambda: on_stage("lookup", number, None)) if on_stage else None
+                        ),
+                    ),
+                    timeout=self.settings.page_timeout_ms / 1000,
+                )
+            finally:
+                _record_phase(phase_ms, "collect", phase_started)
+            _attach_mihomo_error(result, mihomo, log_offset)
+        except asyncio.CancelledError:
+            raise
+        except MihomoNotReadyError:
+            raise
+        except MihomoStopError:
+            raise
+        except Exception as exc:
+            failure = classify_error(exc, phase=failure_phase)
+            mihomo_error = _read_mihomo_error(mihomo, log_offset) if mihomo else ""
+            result = _failed_node(
+                job_id,
+                index,
+                node_name,
+                node_type,
+                exc,
+                phase=failure_phase,
+                mihomo_error=mihomo_error,
+                mihomo=mihomo,
+            )
+        finally:
+            if mihomo:
+                phase_started = perf_counter()
+                try:
+                    await _cleanup_mihomo(mihomo, work_dir)
+                finally:
+                    _record_phase(phase_ms, "stop", phase_started)
+        return _Attempt(number, result, failure, mihomo, dns_bootstrap_proxy)
+
+
+async def _first_success(attempts: list[Any], failures: list[_Attempt]) -> _Attempt | None:
+    """并行跑几次尝试，第一份非失败记录胜出，其余立刻取消；失败的那些追加进 failures。
+
+    无论怎么退出（胜出、全部失败、某次尝试抛错、外层被取消），都要等每个尝试的 Mihomo
+    清理落定再返回；任何一个清理未确认，就以 MihomoStopError 收口——与节点 worker 同口径。
+    """
+
+    tasks = [asyncio.create_task(item) for item in attempts]
+    winner: _Attempt | None = None
+    try:
+        pending = set(tasks)
+        while pending and winner is None:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in sorted(done, key=tasks.index):
+                outcome = task.result()
+                if outcome.failed:
+                    failures.append(outcome)
+                elif winner is None:
+                    winner = outcome
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        settled = await asyncio.gather(*tasks, return_exceptions=True)
+        if any(isinstance(item, MihomoStopError) for item in settled):
+            raise MihomoStopError("Mihomo 子进程清理未确认")
+    return winner
 
 
 async def _cleanup_mihomo(mihomo: Any, work_dir: Path) -> None:
@@ -223,7 +316,7 @@ def _dns_bootstrap_candidates(proxies: list[dict[str, Any]]) -> list[str]:
     IPv6 字面量节点只有在运行环境有 IPv6 出口时才可能连上；一旦被选中而连不上，
     这次尝试的 DNS 就全部失败，日志被读成「节点服务器域名无法解析」，
     于是一个 A 记录正常、本来能连的节点被判成失败并白烧三次尝试。
-    见 implemented/bug-fix/2026-09-23-dns-bootstrap-ipv6-poisoning.md。
+    见 docs/DECISIONS.md「扫描核心」。
     """
     candidates: list[str] = []
     for proxy in proxies:

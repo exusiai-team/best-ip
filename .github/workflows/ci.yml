@@ -1,31 +1,41 @@
 name: CI
 
+# push 只看 main：PR 分支的每次 push 已经由 pull_request 跑一遍，原来 push + pull_request
+# 两个触发会让同一个 commit 跑两次 CI。同一分支连推时取消旧的那次。
 on:
   push:
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      # 不锁版本：没有 package-lock.json / uv.lock，每次按 package.json / pyproject.toml 装最新。
+      - run: npm install --no-audit --no-fund
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           enable-cache: true
           cache-python: true
           python-version: "3.13"
-      - name: Install Python
-        run: uv python install 3.13
-      - name: Sync dependencies
-        run: uv sync --frozen --dev
-      - name: Lint
-        run: uv run ruff check .
-      - name: Install Node dependencies
-        uses: actions/setup-node@v5
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci --prefer-offline --no-audit
+      - name: Lint and test (tests/test_artifact_reader.py 用到 node)
+        run: |
+          uv run ruff check .
+          uv run pytest -q
       # npm run check = 语法（scripts/check_js.mjs）+ 前端契约（scripts/check_frontend_contracts.mjs）
       # + MHTML 序列化往返（frontend-next/tools/mhtml-roundtrip.mjs）。新断言接在 check 里，
       # 所以只要这条在跑，CI 就自动覆盖它们，不必在这里逐条罗列。

@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from ..config import RESULTS_DIR
 from .artifact import build_export, build_manifest
-from .validation import ResultStoreError, node_filename, summary, validate_manifest, validate_node
+from .validation import ResultStoreError, node_filename, summary, validate_node
 
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _PROGRESS_FIELDS = {
@@ -76,31 +76,21 @@ class ResultStore:
         self._atomic_write(self._job_dir(job_id) / "manifest.json", manifest)
         return manifest
 
-    def read_progress(self, job_id: str) -> dict[str, Any]:
-        return self._read_json(self._job_dir(job_id) / "progress.json")
-
+    # 校验只在三处：write_node 写入时逐条、finalize 落 manifest 前整体、
+    # 发布前 build_artifact 再整体一次。读回自己刚写的文件不再重复校验
+    # （原先每条记录一次扫描要被校验约 8 遍）。
     def read_manifest(self, job_id: str) -> dict[str, Any]:
         manifest = self._read_json(self._job_dir(job_id) / "manifest.json")
-        self._validate_manifest(job_id, manifest)
-        return manifest
-
-    def _validate_manifest(self, job_id: str, manifest: dict[str, Any]) -> None:
-        total = manifest.get("total")
-        if not isinstance(total, int) or total < 1:
+        if manifest.get("job_id") != job_id or not isinstance(manifest.get("total"), int):
             raise ResultStoreError("manifest 结构或任务绑定无效")
-        node_dir = self._job_dir(job_id) / "nodes"
-        expected_files = {node_filename(index) for index in range(total)}
-        if {path.name for path in node_dir.glob("*.json")} != expected_files:
-            raise ResultStoreError("manifest 节点文件集合不完整或含额外文件")
-        records = [self.read_node(job_id, index) for index in range(total)]
-        raw = [(node_dir / node_filename(index)).read_bytes() for index in range(total)]
-        validate_manifest(job_id, manifest, records, raw)
+        return manifest
 
     def read_node(self, job_id: str, index: int) -> dict[str, Any]:
         if index < 0:
             raise ResultStoreError("节点索引不能为负数")
         record = self._read_json(self._job_dir(job_id) / "nodes" / self._node_filename(index))
-        self._validate_node(job_id, index, record)
+        if record.get("job_id") != job_id or record.get("node_index") != index:
+            raise ResultStoreError("节点记录结构或身份无效")
         return record
 
     def read_available_summaries(

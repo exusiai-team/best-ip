@@ -6,8 +6,8 @@
    所以这里做三件事，一件都不多：
      1. GET /api/scans/latest —— 问 Worker「最近一次扫描是哪一次、产物在不在」；
      2. 拿它给的签名地址直连 blob 取回 ZIP 字节（Worker 不搬字节，见
-        implemented/architecture/2026-09-21-artifact-bytes-delegated-to-browser.md）；
-     3. 交给 app/artifact/reader.js 逐个字节校验（身份、SHA-256、CRC、manifest 交叉核对），
+        docs/DECISIONS.md「结果与校验」）；
+     3. 交给 app/artifact/reader.js 做完整性校验（身份、SHA-256、CRC、manifest 交叉核对），
         再把 result.json 原样返回——它的形状和本机 loopback 的 ?job= 导出完全一样，
         于是 records.js / render.js 一行都不用改。
 
@@ -20,6 +20,7 @@
 import { readArtifact } from "./artifact/reader.js";
 import { failure, gatewayStatusText } from "./failure.js";
 import { fetchWithTimeout, isTimeoutError } from "./net.js";
+import { normalizeProgress } from "./progress.js";
 
 const LATEST_PATH = "/api/scans/latest";
 const LATEST_TIMEOUT_MS = 30_000;
@@ -44,11 +45,11 @@ const STATUS_REPORT = {
   },
   running: {
     title: "最近一次扫描还在进行",
-    text: "结果还没生成：最近一次扫描还在跑，跑完后刷新这个页面即可看到。",
+    text: "结果还没生成：顶部会跟着这次扫描走进度，跑完后这里自动填上结果，不用刷新。",
   },
   queued: {
     title: "最近一次扫描还在排队",
-    text: "结果还没生成：最近一次扫描还在排队，跑完后刷新这个页面即可看到。",
+    text: "结果还没生成：顶部会跟着这次扫描走进度，跑完后这里自动填上结果，不用刷新。",
   },
   failed: {
     title: "最近一次扫描没有成功",
@@ -94,6 +95,28 @@ export function artifactUrlOf(raw) {
   return parsed.toString();
 }
 
+/**
+ * 最新那次还在排队/执行的扫描（worker/latest.js 的 active）。形状不对就当没有：它只用来
+ * 「跟进」，少了它页面照旧显示已有结果，不值得为它报错。
+ */
+function activeOf(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  if (raw.status !== "queued" && raw.status !== "running") return null;
+  if (typeof raw.request_id !== "string" || !raw.request_id) return null;
+  const startedAt = Date.parse(String(raw.run?.created_at || ""));
+  const runId = Number.isSafeInteger(raw.run?.id) && raw.run.id > 0 ? raw.run.id : 0;
+  const runAttempt = Number.isSafeInteger(raw.run?.run_attempt) && raw.run.run_attempt > 0 ? raw.run.run_attempt : 0;
+  return {
+    requestId: raw.request_id,
+    status: raw.status,
+    startedAt: Number.isFinite(startedAt) ? startedAt : 0,
+    // 逐节点读数（scan.js 的 pollProgress）要靠 run 身份去问；跟进的页面手里只有这一份。
+    runId,
+    runAttempt,
+    progress: normalizeProgress(raw.progress),
+  };
+}
+
 // 401/403/503 三句与 scan.js 共用 app/failure.js 的表（原先两边各抄一份，只差一两个词）；
 // 这里的说法是「读取」而不是「请求」，兜底句保持本文件原来的「本站的扫描网关返回 HTTP N」。
 function httpTextFor(status) {
@@ -136,11 +159,14 @@ async function fetchLatestState(fetchImpl) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw failure("gateway_shape", "扫描网关返回的结构无效");
   }
+  const active = activeOf(payload.active);
   if (payload.artifact_ready !== true) {
     // 没有产物时只信 status 那句话；此时 run/artifact 字段一律不读，避免用半个身份拼出一行数据。
     const report = statusReport(payload.status);
-    throw failure(typeof payload.status === "string" && payload.status ? payload.status : "gateway_status",
+    const error = failure(typeof payload.status === "string" && payload.status ? payload.status : "gateway_status",
       report.text, { title: report.title });
+    error.active = active;
+    throw error;
   }
   const { request_id: requestId, run } = payload;
   const runId = run?.id;
@@ -150,7 +176,23 @@ async function fetchLatestState(fetchImpl) {
     || !Number.isInteger(runAttempt) || runAttempt < 1) {
     throw failure("gateway_shape", "扫描网关说产物就绪，却没给全扫描身份（request_id / run_id / run_attempt）");
   }
-  return { requestId, runId, runAttempt, url: artifactUrlOf(payload.artifact_url) };
+  return { requestId, runId, runAttempt, url: artifactUrlOf(payload.artifact_url), active };
+}
+
+/**
+ * 跟进用的轻量一问：只读 /api/scans/latest 的 JSON，不取字节。返回进行中的那次（没有就是 null）
+ * 与当前可读产物属于哪一次扫描——后者变了，才值得去取一次新字节。
+ */
+export async function pollLatestActive({ fetchImpl = globalThis.fetch } = {}) {
+  if (typeof fetchImpl !== "function") throw failure("no_fetch", "当前环境没有可用的 fetch");
+  try {
+    const state = await fetchLatestState(fetchImpl);
+    return { active: state.active, readyRequestId: state.requestId };
+  } catch (error) {
+    // 没有产物（还没扫过 / 过期 / 最新那次在跑）不是这里的失败：照样把 active 交回去。
+    if (error && Object.hasOwn(error, "active")) return { active: error.active, readyRequestId: null };
+    throw error;
+  }
 }
 
 /** 直连签名地址取字节。CORS 直连是刻意的：Worker 出口到 blob 主机不可靠（见 github.js 注释）。 */
@@ -240,9 +282,22 @@ export async function readArtifactFrom(rounds, { fetchImpl = globalThis.fetch } 
  * 读一次「最近一次扫描」，返回与 ?job= 本地导出同形的 payload。
  * 任何一步不成立都抛错（带 code 与可选 title），由 main.js 决定显示哪一种空状态。
  *
- * @returns {Promise<{id: string, status: string, results: object[], manifest: object}>}
+ * @returns {Promise<{payload: {id: string, status: string, results: object[], manifest: object},
+ *   active: {requestId: string, status: string, startedAt: number, progress: object|null} | null}>}
  */
 export async function fetchLatestScan({ fetchImpl = globalThis.fetch } = {}) {
   // 每轮都重新问一次 /api/scans/latest：签名地址与运行身份都取自同一轮响应。
-  return readArtifactFrom(() => fetchLatestState(fetchImpl), { fetchImpl });
+  // 进行中的那次扫描（active）跟着最后一轮响应走：成功时挂在返回值上，失败时挂在错误上。
+  let active = null;
+  try {
+    const payload = await readArtifactFrom(async () => {
+      const state = await fetchLatestState(fetchImpl);
+      active = state.active;
+      return state;
+    }, { fetchImpl });
+    return { payload, active };
+  } catch (error) {
+    if (error && typeof error === "object" && !Object.hasOwn(error, "active")) error.active = active;
+    throw error;
+  }
 }

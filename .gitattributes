@@ -1,0 +1,3 @@
+# 仓库里的文本一律 LF：本机 core.autocrlf=true 也不会把 CRLF 带进工作区或发布产物。
+* text=auto eol=lf
+*.pem text eol=lf

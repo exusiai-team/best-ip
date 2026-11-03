@@ -2,8 +2,9 @@
    扫描触发通路 —— 在页面上发起一次真实扫描，并把它盯到出结果
    ----------------------------------------------------------------------------
    整条链路都在同源底下，所以生产 CSP 一个字都不用放宽：
-     1. 用 ./scan-public.pem 的公钥把订阅地址封装成信封（app/scan-crypto.js），
-        POST /api/scans 交给 Worker —— 明文订阅地址从不离开浏览器；
+     1. POST /api/scans 把订阅地址交给本站 Worker（同源 HTTPS）。Worker 只把它暂存在自己的
+        Durable Object 里，不放进 GitHub 的 workflow 输入；runner 凭 GitHub Actions OIDC 领一次
+        就删（worker/runner.js）；
      2. Worker 用 GitHub App token 触发 scan.yml（worker/scans.js 的 createScan），
         回 202 { request_id, scan_token, dispatched_at }；token 走 X-Best-IP-Scan-Token
         头，只存在内存里；
@@ -15,7 +16,7 @@
    为什么 token 只放内存：它是一张两小时有效、只对本次 request_id 生效的凭证
    （worker/auth.js 的 signScanToken）。放进 localStorage/sessionStorage 等于给页面引入
    一处可被读走的长效凭证；而刷新一页的代价很小——刷新后 /api/scans/latest 依然会如实
-   说「最近一次扫描还在进行」。这条限制记在笔记里，不靠提示文案遮掩。
+   说「最近一次扫描还在进行」。这条限制是有意的，不靠提示文案遮掩。
 
    为什么轮询有上限：scan.yml 是 timeout-minutes: 30，排队也可能永远排不上。沿用旧前端的
    口径——从没跑起来超过 13 分钟、跑起来超过 31 分钟就停止等待，并如实说「任务可能仍在
@@ -23,43 +24,38 @@
    停止」。这些都是「不再刷这条请求」，不是「任务已被停掉」。
    ========================================================================== */
 
-import { encryptSubscriptionUrl, requestId } from "./scan-crypto.js";
 import { readArtifactFrom, artifactUrlOf } from "./gateway.js";
 import { failure, gatewayStatusText } from "./failure.js";
-import { fetchWithTimeout, isTimeoutError, timeoutPair } from "./net.js";
+import { isTimeoutError, timeoutPair } from "./net.js";
+import { normalizeProgress, stageOf, STAGE_TEXT } from "./progress.js";
 
 const SCANS_PATH = "/api/scans";
 const TOKEN_HEADER = "X-Best-IP-Scan-Token";
 const START_TIMEOUT_MS = 30_000;
 const POLL_TIMEOUT_MS = 30_000;
-// 取加密公钥打的是本站同源的一份 ~1KB PEM，与别的请求同量级；它比别处更该有上限——挂住时
-// 页面停在「正在加密订阅地址并交给扫描网关…」，连一个可以点的按钮都没有。
-const PUBLIC_KEY_TIMEOUT_MS = 15_000;
 const QUEUE_DEADLINE_MS = 13 * 60_000;
 const RUN_DEADLINE_MS = 31 * 60_000;
 const CANCEL_DEADLINE_MS = 2 * 60_000;
 
-// 轮询节奏与旧前端 scan-controller 一致：第一次 2 秒，之后每次 ×1.5，上限 10 秒。
-// 一次扫描要跑几十秒到几分钟，固定 2 秒轮询只会白刷几十次请求。
-export const SCAN_POLL_FIRST_MS = 2_000;
-export const SCAN_POLL_MAX_MS = 10_000;
-
-// worker/scans.js 的 runStatus() 取值 → 页面上的一句话。说「正在做什么」，不说「加载中」。
-const RUN_LABEL = {
-  queued: "已排队，等待执行",
-  running: "扫描执行中",
-  completed: "扫描执行已完成",
-  cancelled: "扫描已取消",
-  failed: "扫描执行失败",
-};
+// 轮询节奏：第一次 1.5 秒，之后每次 ×1.5，上限 4 秒。原先上限是 10 秒：一次实测约 60 秒的扫描，
+// 跑完之后页面最多还要干等 10 秒才发现；进度条也会一跳十几个节点。每轮在 Worker 侧是两三次
+// GitHub API 读（GitHub App 每小时 5000 次额度），4 秒一轮跑满 30 分钟上限也只用掉一成出头。
+export const SCAN_POLL_FIRST_MS = 1_500;
+export const SCAN_POLL_MAX_MS = 4_000;
+// 节点检测完（runner 报了 packaging/done）之后，运行再过两三秒就结束：这时改成每秒问一次，
+// 运行一结束就能取结果，不再白等最多 4 秒。
+export const SCAN_POLL_FINISH_MS = 1_000;
+// 逐节点读数（GET /api/scans/<id>/progress）只读 Worker 的 Durable Object、不碰 GitHub API，
+// 所以可以每秒问一次——节点的阶段是秒级变化的。
+export const SCAN_PROGRESS_POLL_MS = 1_000;
 
 // 失败对象与状态码文案来自 app/failure.js：原先本文件的 failure() 与 gateway.js 的 error()
 // 同形（都挂 code、可选 title），401/403/503 三句也各写一份。见该文件头部。
 
 /**
- * 提交前的快检查，与 frontend/src/transport/http.js 的 validateSubscriptionUrl 同文案。
- * 这不是多余的一份：加密模块内部也会校验，但那一步已经生成了 AES 密钥、可能还取了公钥，
- * 而地址最常见的手误（漏了 https:// 、粘成了带账号密码的内网地址）不值得先清空表格再报错。
+ * 提交前的快检查（文案沿用旧前端的 validateSubscriptionUrl）。
+ * 这不是多余的一份：Worker 也会校验，但地址最常见的手误（漏了 https:// 、粘成了带账号密码的
+ * 内网地址）不值得先清空表格、发一趟请求再报错。
  */
 export function validateSubscriptionUrl(value) {
   let url;
@@ -74,19 +70,17 @@ export function validateSubscriptionUrl(value) {
   return url.toString();
 }
 
-/**
- * 给 scan-crypto.js 注入的 fetchImpl 套上超时。
- * 那条取公钥的请求（importPublicKey 里的 fetchImpl(url, { cache: "no-store" })）原本没有超时，
- * 挂住的话页面会永久停在「正在加密订阅地址并交给扫描网关…」。scan-crypto.js 不能改（它与
- * frontend/src/crypto.js 是人工同步的副本），但 fetchImpl 是注入的，所以在注入点补上。
- */
-function withPublicKeyTimeout(fetchImpl) {
-  return (input, init) => fetchWithTimeout(fetchImpl, input, init, PUBLIC_KEY_TIMEOUT_MS);
+/** 浏览器生成的关联 ID：同时是 workflow 的 run-name 与 Worker 侧暂存状态的键。 */
+export function requestId() {
+  if (globalThis.crypto?.randomUUID) return `req-${globalThis.crypto.randomUUID()}`;
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return `req-${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
 /**
  * 一次同源 JSON 请求。非 2xx 时优先用 Worker 自己给的那句话（worker/responses.js 的形状是
- * { error, detail }）——「扫描公钥指纹不匹配」比一句通用的「请求失败」有用得多。
+ * { error, detail }）——「订阅地址必须是公开的 http/https 链接」比一句通用的「请求失败」有用得多。
  */
 async function requestJson(fetchImpl, path, { method = "GET", body = null, token = "", timeout = POLL_TIMEOUT_MS } = {}) {
   const headers = { Accept: "application/json" };
@@ -148,7 +142,7 @@ async function requestJson(fetchImpl, path, { method = "GET", body = null, token
 function httpMessage(status) {
   if (status === 404) return "本站不认识这个扫描任务（404）。";
   if (status === 409) return "这次扫描的状态与请求对不上（409）。";
-  if (status === 413) return "加密后的订阅地址超过本站上限（413）。";
+  if (status === 413) return "订阅地址超过本站上限（413）。";
   if (status === 429) return "本站正在限流（429）：稍等一会儿再发起扫描。";
   return gatewayStatusText(status, {
     sessionTail: "后再发起扫描",
@@ -214,43 +208,14 @@ function runStatusOf(run) {
   return status;
 }
 
-// 时长写法照抄旧前端 scan-view.js 的 formatDuration：一小时以内给「分秒」，超过给「小时分」。
-function formatDuration(milliseconds) {
-  if (!Number.isFinite(milliseconds) || milliseconds < 0) return "";
-  const totalSeconds = Math.floor(milliseconds / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours) return `${hours}小时${minutes}分`;
-  if (minutes) return `${minutes}分${seconds}秒`;
-  return `${seconds}秒`;
-}
-
-function elapsedOf(run, session, now) {
-  const started = Date.parse(String(run?.started_at || run?.created_at || ""));
-  const from = Number.isFinite(started) ? started : session.dispatchedAt;
-  return now() - from;
-}
-
-/** 进度正文：能从 Actions 的 jobs/steps 里读出「当前在哪一步」就说出来，读不到就说读不到。 */
-function progressDetail(run, remote, session, now) {
-  const parts = [];
-  const elapsed = elapsedOf(run, session, now);
-  // 0–999 毫秒时 formatDuration 给的是「0秒」，读起来像卡住了；这一档直接说「不到 1 秒」。
-  parts.push(`已用时 ${elapsed < 1000 ? "不到 1 秒" : formatDuration(elapsed)}`);
-  if (remote.jobs_available === false) {
-    parts.push("这一步的明细暂时读不到");
-    return parts.join(" · ");
-  }
-  const jobs = Array.isArray(remote.jobs) ? remote.jobs : [];
-  const total = Number.isInteger(remote.jobs_total_count) ? remote.jobs_total_count : jobs.length;
-  if (total > 1) parts.push(`任务 ${jobs.filter((job) => job?.status === "completed").length}/${total}`);
-  const running = jobs.find((job) => job?.status === "in_progress") || null;
-  const steps = Array.isArray(running?.steps) ? running.steps : [];
-  const current = steps.find((step) => step?.status === "in_progress") || null;
-  if (current && current.name) parts.push(`当前步骤：${current.name}`);
-  else if (steps.length) parts.push(`步骤 ${steps.filter((step) => step?.status === "completed").length}/${steps.length}`);
-  return parts.join(" · ");
+/**
+ * 这一轮的说明文字。读不到 job 明细时如实说一句，不让「准备环境」这段看起来像卡住了。
+ */
+function stageMessage(stage, remote, progress) {
+  if (stage === "prepare" && progress?.phase === "subscription") return "启动中：正在拉取并解析订阅";
+  if (stage === "scan" && !progress) return `${STAGE_TEXT.scan}（这次读不到实时进度）`;
+  const base = STAGE_TEXT[stage] || STAGE_TEXT.prepare;
+  return remote?.jobs_available === false ? `${base} · 这一步的明细暂时读不到` : base;
 }
 
 /**
@@ -277,29 +242,12 @@ function assertWithinDeadline(session, now) {
  * 发起一次扫描。
  * @returns {Promise<object>} 只存在内存里的会话：后续 pollScan / cancelScan 都靠它。
  */
-export async function startScan(subscriptionUrl, config, { fetchImpl = globalThis.fetch, baseURI = globalThis.document?.baseURI, now = Date.now } = {}) {
+export async function startScan(subscriptionUrl, { fetchImpl = globalThis.fetch, now = Date.now } = {}) {
   if (typeof fetchImpl !== "function") throw failure("no_fetch", "当前环境没有可用的 fetch");
   const id = requestId();
-  // 公钥指纹在这一步被核对（importPublicKey 拿 PEM 的 DER SHA-256 比 config.keyId）：
-  // 与 Worker 的 SCAN_KEY_ID 不是同一把时当场失败，不发出一个必然被 400 拒掉的请求。
-  // 公钥指纹在这一步被核对（importPublicKey 拿 PEM 的 DER SHA-256 比 config.keyId）：
-  // 与 Worker 的 SCAN_KEY_ID 不是同一把时当场失败，不发出一个必然被 400 拒掉的请求。
-  // 只有这一步需要单独收口：scan-crypto.js 自己只会为「没配 / 格式无效 / 指纹不符」给文案，
-  // 它那条取公钥的请求没有超时，超时错误得在这里翻译成一句能看懂的话。
-  let envelope;
-  try {
-    envelope = await encryptSubscriptionUrl(subscriptionUrl, id, config, {
-      fetchImpl: withPublicKeyTimeout(fetchImpl),
-      baseURI,
-    });
-  } catch (cause) {
-    if (!isTimeoutError(cause)) throw cause;
-    throw failure("public_key_timeout",
-      `GitHub Actions 加密公钥 ${PUBLIC_KEY_TIMEOUT_MS / 1000} 秒内没有返回`, { retryable: true });
-  }
   const payload = await requestJson(fetchImpl, SCANS_PATH, {
     method: "POST",
-    body: { request_id: id, key_id: String(config.keyId), envelope },
+    body: { request_id: id, subscription_url: validateSubscriptionUrl(subscriptionUrl) },
     timeout: START_TIMEOUT_MS,
   });
   if (!payload || typeof payload !== "object" || payload.request_id !== id
@@ -320,7 +268,8 @@ export async function startScan(subscriptionUrl, config, { fetchImpl = globalThi
 
 /**
  * 问一次进度。
- * @returns {Promise<{status:string,label:string,detail:string,done:boolean,payload?:object,failure?:string}>}
+ * @returns {Promise<{status:string,stage:string,progress:object|null,message:string,done:boolean,payload?:object,failure?:string}>}
+ *   stage 是步骤条上的一段（见 app/progress.js），progress 是 runner 回报的计数读数（可能为 null）。
  *   done 为 true 时：有 payload 就是这一轮的扫描结果（与 ?job= 导出同形），有 failure 就是这次扫描没成。
  *   传输/形状类错误直接抛（带 retryable），由调用方决定重试还是收口。
  */
@@ -331,8 +280,9 @@ export async function pollScan(session, { fetchImpl = globalThis.fetch, now = Da
     assertWithinDeadline(session, now);
     return {
       status: "queued",
-      label: "等待创建扫描任务",
-      detail: "扫描请求已经交给 GitHub Actions，等待它创建这次运行。",
+      stage: "queue",
+      progress: null,
+      message: "已交给 GitHub Actions，等待它创建这次运行",
       done: false,
     };
   }
@@ -341,26 +291,22 @@ export async function pollScan(session, { fetchImpl = globalThis.fetch, now = Da
   if (session.status === "running") session.hasRun = true;
   assertWithinDeadline(session, now);
 
-  const detail = progressDetail(run, remote, session, now);
+  const progress = normalizeProgress(remote.progress);
+  const stage = stageOf({ runStatus: session.status, jobs: remote.jobs, progress });
+  const base = { status: session.status, stage, progress };
   if (run.status !== "completed") {
-    return { status: session.status, label: RUN_LABEL[session.status] || "扫描执行中", detail, done: false };
+    return { ...base, message: stageMessage(stage, remote, progress), done: false };
   }
   if (run.conclusion !== "success") {
     return {
-      status: session.status,
-      label: RUN_LABEL[session.status] || "扫描执行失败",
-      detail,
+      ...base,
+      message: `扫描执行结束：${run.conclusion || "unknown"}`,
       done: true,
       failure: `扫描执行结束：${run.conclusion || "unknown"}`,
     };
   }
   if (remote.artifact_ready !== true) {
-    return {
-      status: "completed",
-      label: "执行已完成，等待终态结果",
-      detail: `${detail} · GitHub 还在发布这次运行的产物`,
-      done: false,
-    };
+    return { ...base, message: "执行已完成：GitHub 还在发布这次运行的产物", done: false };
   }
 
   // 每一轮都重新问一次签名地址：地址有有效期，重试必须用新的一张（readArtifactFrom 负责重试
@@ -374,7 +320,21 @@ export async function pollScan(session, { fetchImpl = globalThis.fetch, now = Da
       runAttempt: session.runAttempt,
     };
   }, { fetchImpl });
-  return { status: "completed", label: "扫描已完成", detail, done: true, payload };
+  return { ...base, message: "扫描完成", done: true, payload };
+}
+
+/**
+ * 问一次逐节点读数（GET /api/scans/<id>/progress）。target 是 { id, runId, runAttempt }：
+ * 自己发起的扫描用 session，刷新后跟进的用 latest 交回的 active——这个端点只要站点会话，
+ * 不要 scan token。读不到（还没报上来、run 对不上）时返回 null。
+ */
+export async function pollProgress(target, { fetchImpl = globalThis.fetch } = {}) {
+  if (!target?.id || !positiveInteger(target.runId) || !positiveInteger(target.runAttempt)) return null;
+  const query = new URLSearchParams({ run_id: String(target.runId), run_attempt: String(target.runAttempt) });
+  const remote = await requestJson(fetchImpl, `${SCANS_PATH}/${encodeURIComponent(target.id)}/progress?${query}`, {
+    timeout: 10_000,
+  });
+  return normalizeProgress(remote?.progress);
 }
 
 /**

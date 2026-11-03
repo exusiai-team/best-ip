@@ -6,8 +6,8 @@
    最终交出同一份导出 payload，字段映射在 records.js，页面接线在 main.js。
 
    为什么 base 只允许 http:// + 127.0.0.1/localhost/::1 + 显式端口：
-   地址可以来自 URL 参数，任何人构造一个链接就能把页面指向别处。这里照抄
-   frontend/src/transport/local.js 的严格性（只把 hostname 放宽到 localhost 与 ::1），
+   地址可以来自 URL 参数，任何人构造一个链接就能把页面指向别处。这里沿用旧前端本地通路的
+   严格性（只把 hostname 放宽到 localhost 与 ::1），
    带路径 / 查询 / 凭据或非 http 的 origin 一律拒掉。放宽校验不会换来能力，只会造出
    一个「地址看着合法、请求被本地 CORS 拒掉」的死链接。
 

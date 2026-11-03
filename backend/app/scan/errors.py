@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -196,6 +197,66 @@ def _summarize_mihomo_error(message: str) -> str:
     if "network is unreachable" in normalized:
         return "节点服务器网络不可达"
     return "Mihomo 节点连接失败"
+
+
+# 实时进度里每个节点的「为什么」：只放代码自己写出来的那几句分类文案（白名单），
+# 不放任何可能夹带主机名、IP 或订阅内容的原文——进度不经过产物那道脱敏与逐字节校验。
+_LIVE_REASONS = frozenset(
+    {
+        "Mihomo 节点配置不受支持",
+        "节点服务器域名无法解析",
+        "节点 REALITY 认证失败",
+        "连接节点服务器超时",
+        "节点服务器拒绝连接",
+        "节点 TLS 握手失败",
+        "节点服务器重置连接",
+        "节点服务器提前断开连接",
+        "节点服务器网络不可达",
+        "Mihomo 节点连接失败",
+        "Mihomo selector 未确认所选节点",
+        "节点传输连接失败",
+    }
+)
+_LIVE_REASON_PATTERNS = (
+    re.compile(r"Mihomo selector 切换失败（HTTP \d{3}）"),
+    re.compile(r"节点采集失败（[A-Za-z]{1,40}）"),
+)
+# completeness.unrecorded_requests 的键 → 「部分」节点缺了哪几项。
+_LIVE_MISSING = {
+    "ipure_recorded": "IPure 评分",
+    "global_ping_recorded": "全球 Ping",
+    "port_scan_recorded": "端口扫描",
+    "ping_check_recorded": "连通检测",
+    "related_recorded": "关联域名",
+}
+
+
+def live_reason(text: object) -> str:
+    """一段错误文案 → 白名单里的一句；合并过的多句（「；」分隔）取第一句认得的。"""
+
+    for part in str(text or "").split("；"):
+        part = part.strip()
+        if part in _LIVE_REASONS or any(
+            pattern.fullmatch(part) for pattern in _LIVE_REASON_PATTERNS
+        ):
+            return part
+    return "检测失败"
+
+
+def live_record_reason(record: dict[str, Any]) -> str | None:
+    """终态记录 → 实时视图里的一句原因：失败说卡在哪，部分说缺了什么，完整不说。"""
+
+    status = record.get("status")
+    if status == "failed":
+        return live_reason(record.get("transport_error") or record.get("error"))
+    if status == "partial":
+        completeness = record.get("completeness")
+        if not isinstance(completeness, dict):
+            completeness = {}
+        missing = completeness.get("unrecorded_requests")
+        labels = [_LIVE_MISSING[key] for key in missing or [] if key in _LIVE_MISSING]
+        return f"缺 {'、'.join(labels)}" if labels else "富化数据不完整"
+    return None
 
 
 def _safe_exception_error(exc: Exception) -> str:

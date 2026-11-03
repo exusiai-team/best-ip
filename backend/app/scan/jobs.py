@@ -26,7 +26,14 @@ from ..subscription import (
     is_subscription_metadata,
     parse_subscription,
 )
-from .errors import ScanError, _now, _safe_job_error, classify_error
+from .errors import (
+    ScanError,
+    _now,
+    _safe_job_error,
+    classify_error,
+    live_reason,
+    live_record_reason,
+)
 from .models import ScanProgress
 from .node_runner import NodeRunner, _dns_bootstrap_candidates, _remove_work_dir
 
@@ -44,6 +51,8 @@ class JobAlreadyExistsError(RuntimeError):
 
 
 _PROGRESS_WRITE_INTERVAL_SECONDS = 0.2
+# 实时视图里一个节点「进行中」的几档，按先后排：并行重试时显示走得最远的那一路。
+_LIVE_STAGE_RANK = {"retry": 0, "start": 1, "connect": 2, "lookup": 3}
 
 
 class ScanJobManager:
@@ -72,6 +81,8 @@ class ScanJobManager:
         self._summaries: dict[str, dict[int, dict[str, Any]]] = {}
         self._progress_locks: dict[str, asyncio.Lock] = {}
         self._progress_last_write: dict[str, float] = {}
+        # 每个节点此刻在做什么（只给实时进度回报用，不落盘、不进产物）。
+        self._live: dict[str, list[dict[str, Any]]] = {}
         self._semaphore = asyncio.Semaphore(app_settings.max_parallel_jobs)
         self.node_parallelism = app_settings.max_parallel_nodes
 
@@ -242,6 +253,34 @@ class ScanJobManager:
             raise JobNotFoundError(job_id)
         return self._errors.get(job_id)
 
+    def live_nodes(self, job_id: str) -> list[dict[str, Any]] | None:
+        """每个节点此刻的状态（订阅顺序）：等待 / 进行到哪一档 / 终态，以及已用时与原因。
+
+        进行中的节点给的是「到此刻为止」的用时。订阅还没解析完时返回 None。
+        """
+
+        live = self._live.get(job_id)
+        if live is None:
+            return None
+        now = perf_counter()
+        snapshot = []
+        for entry in live:
+            started = entry["started"]
+            elapsed = entry["elapsed_ms"]
+            if elapsed is None:
+                elapsed = 0 if started is None else round((now - started) * 1000)
+            snapshot.append(
+                {
+                    "name": entry["name"],
+                    "type": entry["type"],
+                    "state": entry["state"],
+                    "attempt": entry["attempt"],
+                    "elapsed_ms": elapsed,
+                    "reason": entry["reason"],
+                }
+            )
+        return snapshot
+
     async def shutdown(self) -> None:
         active = [task for task in self._tasks.values() if not task.done()]
         for task in active:
@@ -303,6 +342,7 @@ class ScanJobManager:
                     if not proxies:
                         raise SubscriptionError("订阅中没有可检测的代理节点")
                     job["total"] = len(proxies)
+                    self._live[job_id] = [_live_entry(proxy) for proxy in proxies]
                     await _to_thread_uncancelled(
                         self.result_store.initialize,
                         job_id,
@@ -431,13 +471,19 @@ class ScanJobManager:
                 int(metrics.get("peak_active_nodes") or 0),
                 metrics["active_nodes"],
             )
+        live = self._live.get(job["id"])
+        entry = live[index] if live is not None and index < len(live) else None
+        node_started = perf_counter()
         try:
 
-            def on_attempt(attempt: int) -> None:
-                job["message"] = (
-                    f"正在并行检测 {index + 1}/{job['total']}：{proxy['name']}，"
-                    f"尝试 {attempt}/{self.settings.max_node_attempts}"
-                )
+            def on_stage(stage: str, attempt: int, reason: str | None) -> None:
+                if stage == "start":
+                    job["message"] = (
+                        f"正在并行检测 {index + 1}/{job['total']}：{proxy['name']}，"
+                        f"尝试 {attempt}/{self.settings.max_node_attempts}"
+                    )
+                if entry is not None:
+                    _advance_live(entry, stage, attempt, reason, node_started)
 
             outcome = await self.node_runner.run(
                 job_id=job["id"],
@@ -447,7 +493,7 @@ class ScanJobManager:
                 index=index,
                 dns_bootstrap_candidates=dns_bootstrap_candidates,
                 outbound_interface=outbound_interface,
-                on_attempt=on_attempt,
+                on_stage=on_stage,
             )
             result = outcome.record
             if outcome.error is not None:
@@ -469,6 +515,11 @@ class ScanJobManager:
             finally:
                 _record_phase(job, "write", phase_started)
             self._summaries.setdefault(job["id"], {})[index] = self.result_store.summary(result)
+            # 终态与计数在同一段同步代码里落定：进度回报读到的「各状态节点数」与计数永远一致。
+            if entry is not None:
+                entry["state"] = str(result.get("status") or "failed")
+                entry["elapsed_ms"] = round((perf_counter() - node_started) * 1000)
+                entry["reason"] = live_record_reason(result)
             _count_result(job, result)
             job["completed"] += 1
             await self._write_progress(job)
@@ -527,6 +578,36 @@ def _progress(job: dict[str, Any]) -> ScanProgress:
         "updated_at": _now(),
         "error": job.get("error"),
     }
+
+
+def _live_entry(proxy: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": str(proxy.get("name") or ""),
+        "type": str(proxy.get("type") or ""),
+        "state": "wait",
+        "attempt": 0,
+        "started": None,
+        "elapsed_ms": None,
+        "reason": None,
+    }
+
+
+def _advance_live(
+    entry: dict[str, Any], stage: str, attempt: int, reason: str | None, started: float
+) -> None:
+    """进行中的一档。并行重试的几路各自报，显示走得最远的那一路；进入重试时从头算。"""
+
+    if stage not in _LIVE_STAGE_RANK or entry["elapsed_ms"] is not None:
+        return
+    if entry["started"] is None:
+        entry["started"] = started
+    if stage == "retry":
+        entry["state"] = "retry"
+        # 上一次失败的原文可能夹带主机名或地址：只留白名单里的那句分类文案。
+        entry["reason"] = live_reason(reason)
+    elif _LIVE_STAGE_RANK[stage] >= _LIVE_STAGE_RANK.get(entry["state"], -1):
+        entry["state"] = stage
+    entry["attempt"] = max(int(entry["attempt"]), attempt)
 
 
 def _count_result(job: dict[str, Any], result: dict[str, Any]) -> None:

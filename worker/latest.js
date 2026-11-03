@@ -12,6 +12,7 @@ import { json } from "./responses.js";
 import { githubJson, githubArtifactUrl } from "./github.js";
 import { findArtifact } from "./artifacts.js";
 import { expectedRunTitle, runStatus } from "./scans.js";
+import { readScanProgress } from "./progress.js";
 
 // 这是新前端的**只读**入口：站点页面没有订阅输入、没有开始按钮，扫描仍然由页面之外发起
 // （Actions 的 workflow_dispatch / 脚本），页面只回答「最近一次扫描是什么、结果在哪」。
@@ -72,6 +73,23 @@ function payloadFor(requestId, run, artifact, status) {
 }
 
 /**
+ * 最新那次运行还在排队或执行时，把它单独交出来：页面据此「跟进」而不是让人反复刷新。
+ * 它与下面挑出来的产物是两件事——旧结果照常显示，新扫描在旁边走进度，跑完再换表。
+ * 只给身份、状态与计数读数；没有 scan_token 的一方拿不到取消权，也看不到 job 明细。
+ */
+async function activeScan(env, newest) {
+  const status = newest ? runStatus(newest) : null;
+  if (status !== "queued" && status !== "running") return null;
+  const requestId = scanRequestId(newest);
+  return {
+    request_id: requestId,
+    status,
+    run: runIdentity(newest),
+    progress: await readScanProgress(env, requestId, newest),
+  };
+}
+
+/**
  * 最近一次扫描的状态。挑 run 的顺序是「从最新往回」，最多看 ARTIFACT_PROBES 次：
  * scan.yml 的 artifact 只保留 1 天（retention-days: 1），最新那次常常已经过期，
  * 这时往前多找几次比让页面空着更有用；再往前翻既没意义（都过期了）也白花 GitHub 配额。
@@ -86,6 +104,8 @@ export async function latestScanState(env) {
   const runs = Array.isArray(payload?.workflow_runs) ? payload.workflow_runs : [];
   const scanned = runs.filter(isScanRun);
   const newest = scanned[0] || null;
+  // 与产物探测并行：进度读数是一次 Durable Object 往返，不该排在最多 5 次 GitHub 探测后面。
+  const activePromise = activeScan(env, newest);
   let probes = 0;
   let probeErrors = 0;
   let firstProbeError = null;
@@ -98,7 +118,7 @@ export async function latestScanState(env) {
       const artifact = await findArtifact(env, run, requestId);
       if (!artifact) continue;
       const ready = { id: artifact.id, name: artifact.name, url: await githubArtifactUrl(env, artifact.id) };
-      return json(payloadFor(requestId, run, ready, "completed"), 200, { "Cache-Control": "no-store" });
+      return json({ ...payloadFor(requestId, run, ready, "completed"), active: await activePromise }, 200, { "Cache-Control": "no-store" });
     } catch (cause) {
       // 单次探测失败（限流 / 5xx / 产物名撞车）不该让整条只读路径塌掉：
       // 更旧的那次产物可能好好的，继续往前找比当场 502 有用。
@@ -109,7 +129,10 @@ export async function latestScanState(env) {
 
   // 每一次探测都失败了：这是上游坏了，不是「产物过期」。把真实原因抛出去，
   // 否则页面会把一次 GitHub 故障说成「结果已经不在 GitHub 上了」。
-  if (probes > 0 && probeErrors === probes) throw firstProbeError;
+  if (probes > 0 && probeErrors === probes) {
+    await activePromise.catch(() => null);
+    throw firstProbeError;
+  }
 
   // 一次都没扫过：报 none，而不是假装有结果；最新那次还没跑完或跑挂了就照它的真实状态说。
   const status = newest === null
@@ -117,5 +140,9 @@ export async function latestScanState(env) {
     : runStatus(newest) === "completed"
       ? "artifact_expired"
       : runStatus(newest);
-  return json(payloadFor(newest ? scanRequestId(newest) : null, newest, null, status), 200, { "Cache-Control": "no-store" });
+  return json(
+    { ...payloadFor(newest ? scanRequestId(newest) : null, newest, null, status), active: await activePromise },
+    200,
+    { "Cache-Control": "no-store" },
+  );
 }

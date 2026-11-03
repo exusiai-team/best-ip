@@ -4,10 +4,19 @@
   "main": "worker/index.js",
   "compatibility_date": "2026-08-23",
   "workers_dev": true,
-  // 线上页面的静态根（scripts/verify_deploy.mjs 以这一行为比对基准）。
   "assets": {
     "directory": "./frontend-next",
     "binding": "ASSETS",
     "run_worker_first": true
-  }
+  },
+  // 扫描进行中的实时进度（只有计数与阶段，见 worker/progress.js）。每个 request_id 一个实例，
+  // 6 小时后自清。SQLite 后端的 Durable Object 在 Workers 免费计划可用，发布时由迁移自动创建，
+  // 不需要事先在控制台建任何资源；绑定缺失时页面只是退回「只显示步骤名」。
+  "durable_objects": {
+    "bindings": [{ "name": "SCAN_PROGRESS", "class_name": "ScanProgress" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ScanProgress"] }],
+  // Workers Builds 给非生产分支跑 `wrangler preview`，新版 wrangler 要求有这个块。
+  // 预览不继承顶层的绑定与密钥：预览站点只证明「能构建、能上传」，打开会提示 Worker 未配置。
+  "previews": {}
 }

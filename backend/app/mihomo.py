@@ -14,8 +14,8 @@ from urllib.parse import quote
 import httpx
 import yaml
 
-from .sources.http import COFFEE_HOST, IPQS_HOST, IPURE_HOST
-
+COFFEE_HOST = "ip.net.coffee"
+IPURE_HOST = "ipure.dev"
 MIHOMO_NOT_READY_MESSAGE = (
     "Mihomo 核心未就绪，请运行 uv run python scripts/download_mihomo.py"
 )
@@ -274,7 +274,6 @@ class MihomoProcess:
             "rules": [
                 f"DOMAIN,{COFFEE_HOST},{self.group_name}",
                 f"DOMAIN,{IPURE_HOST},{self.group_name}",
-                f"DOMAIN,{IPQS_HOST},{self.group_name}",
                 f"DOMAIN,chatgpt.com,{self.group_name}",
                 f"DOMAIN,api.openai.com,{self.group_name}",
                 "MATCH,REJECT",
@@ -335,8 +334,7 @@ class MihomoProcess:
         `/proxies/BEST-IP` 是 404。那个 404 在该路由里只有一个来源：chi 的
         `findProxyByName` 查不到这个名字（`PUT` 的 `updateProxy` 只会回 400/204）。
         2026-09-23 的取证也指向同一处：404 那一刻监听控制端口的进程是我们自己的
-        子进程、用的是我们的 secret，几十毫秒后组就在了。见
-        implemented/bug-fix/2026-09-23-selector-readiness-race.md。
+        子进程、用的是我们的 secret，几十毫秒后组就在了。见 docs/DECISIONS.md「扫描核心」。
         """
         deadline = asyncio.get_running_loop().time() + 15
         controller_ready = False
