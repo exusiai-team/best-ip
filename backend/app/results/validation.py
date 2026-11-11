@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 from ..sources.ipqs import IPQS_GRADES
 from ..sources.ipure import IPURE_RESTRICTED_SCORE, IPURE_SCENARIOS, IPURE_USAGE_TYPES
+from ..sources.ipx import IPX_GRADES, ipx_report_url
 
 _SUMMARY_KEYS = (
     "node_index",
@@ -103,6 +104,9 @@ _NODE_FIELDS = {
     "ipqs_score",
     "ipqs_grade",
     "ipqs_report_url",
+    "ipx_score",
+    "ipx_grade",
+    "ipx_report_url",
     "is_residential",
     "is_datacenter",
     "is_native",
@@ -261,6 +265,7 @@ def validate_node(job_id: str, index: int, record: dict[str, Any]) -> None:
         validate_ipure_scores(record)
         validate_ipure_evidence(record["proxy_evidence"], record["requests"])
         validate_ipqs(record)
+        validate_ipx(record)
         validate_exit_ip(record.get("exit_ip"))
     elif status == "failed":
         if record.get("exit_ip") is not None:
@@ -388,6 +393,45 @@ def validate_ipqs(record: dict[str, Any]) -> None:
         or ipqs.get("via_mihomo") is not (not direct)
     ):
         raise ResultStoreError("节点 1ms IPQS 出口证据无效")
+
+
+def validate_ipx(record: dict[str, Any]) -> None:
+    """ipx.al score fields: closed value domains, and the report must describe this exit IP.
+
+    The proxied request asks for the caller's own report, so its echoed `ip` is the only
+    thing tying the score to this node; a host-side fallback must have asked by this IP.
+    """
+
+    score = record.get("ipx_score")
+    grade = record.get("ipx_grade")
+    if score is not None and (
+        not isinstance(score, int) or isinstance(score, bool) or not 0 <= score <= 100
+    ):
+        raise ResultStoreError("节点 ipx.al 评分取值无效")
+    if grade is not None and (score is None or grade not in IPX_GRADES):
+        raise ResultStoreError("节点 ipx.al 等级取值无效")
+    ipx = record["requests"].get("ipx")
+    if not isinstance(ipx, dict):
+        if score is not None:
+            raise ResultStoreError("节点 ipx.al 评分缺少请求证据")
+        return
+    direct = ipx.get("direct_fallback")
+    if (
+        not isinstance(direct, bool)
+        or record["proxy_evidence"].get("ipx_via_direct_fallback") is not direct
+        or ipx.get("via_mihomo") is not (not direct)
+    ):
+        raise ResultStoreError("节点 ipx.al 出口证据无效")
+    if score is None:
+        return
+    data = ipx.get("data")
+    if (
+        not isinstance(data, dict)
+        or data.get("score") != score
+        or not _same_ip(data.get("ip"), record.get("exit_ip"))
+        or (direct and ipx.get("url") != ipx_report_url(record["exit_ip"]))
+    ):
+        raise ResultStoreError("节点 ipx.al 评分与出口 IP 不对应")
 
 
 def validate_exit_ip(value: Any) -> None:

@@ -577,8 +577,8 @@ function exportGridHtml() {
     span.append(...button.childNodes);
     button.replaceWith(span);
   });
-  // 出处链接降成普通药丸：快照约定不含任何外链。
-  grid.querySelectorAll("a.score").forEach((link) => {
+  // 来源图标的报告链接降成普通 span（图标是内嵌 data URI，照样显示）：快照约定不含任何外链。
+  grid.querySelectorAll("a.src-link").forEach((link) => {
     const span = document.createElement("span");
     for (const { name, value } of Array.from(link.attributes)) {
       if (!["href", "target", "rel"].includes(name)) span.setAttribute(name, value);

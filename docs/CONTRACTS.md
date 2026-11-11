@@ -255,6 +255,18 @@ otherwise ends in `MATCH,REJECT` — and may fall back to a recorded host-side q
 must agree, and a successful fallback keeps the proxy failure in `requests.ipqs.proxy_error`.
 A missing 1ms report makes the node `partial` (`completeness.checks.ipqs_recorded`). None of
 these fields is in the manifest summary, so older manifests still verify.
+ipx.al is read the other way round: `GET https://ipx.al/json` through the node proxy asks for
+the caller's own report, so it starts together with the trace. It is accepted only when its
+echoed `ip` equals the trace exit IP; otherwise (or on any proxy failure) the host asks
+`GET /api/report/{exit_ip}` directly, with `requests.ipx.direct_fallback` / `via_mihomo` /
+`proxy_evidence.ipx_via_direct_fallback` agreeing and the reason in `requests.ipx.proxy_error`
+(`IPMismatch` or the proxy error type). `health.score` (integer 0..100) and a valid `ip` are
+required; the record carries three optional fields `ipx_score`, `ipx_grade` (one of 极佳 良好 一般
+较差 高风险, never without a score) and `ipx_report_url` (`https://ipx.al/{ip}`). The validator
+also requires `requests.ipx.data.ip` to equal `exit_ip` and `data.score` to equal `ipx_score`.
+Items (negative `points` are deductions), ceiling, type and native verdict stay in
+`requests.ipx.data`. A missing ipx report makes the node `partial`
+(`completeness.checks.ipx_recorded`); `ipx.al` is in the Mihomo allowlist.
 Retry metadata, when present, must be internally consistent.
 Required and optional record fields are enforced by Python's ResultStore validator;
 fixtures carry the minimal valid set, not a real enrichment response.

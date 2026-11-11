@@ -11,6 +11,7 @@ from urllib.parse import quote
 from . import coffee, gpt_checks
 from . import ipqs as ipqs_source
 from . import ipure as ipure_source
+from . import ipx as ipx_source
 from . import who as who_source
 from .coffee import (
     _global_ping_summary,
@@ -34,6 +35,9 @@ from .http import (
     IPURE_HOST,
     IPURE_ORIGIN,
     IPURE_TIMEOUT_SECONDS,
+    IPX_HOST,
+    IPX_SELF_URL,
+    IPX_TIMEOUT_SECONDS,
     WHO_HOST,
     WHO_ME_URL,
     WHO_ORIGIN,
@@ -64,7 +68,7 @@ class CoffeeCollector:
         """on_exit_ip：trace 取到出口 IP、开始查 IP 资料的那一刻回调一次（只给实时进度用）。"""
         started_at = _now()
         started = perf_counter()
-        # who 问的是连接本身，不需要先知道出口 IP，与 trace 同时发出。
+        # who 与 ipx /json 问的是连接本身，不需要先知道出口 IP，与 trace 同时发出。
         async with (
             self.transport.client() as client,
             _background(
@@ -75,6 +79,14 @@ class CoffeeCollector:
                     timeout_seconds=self.transport.deadline(WHO_TIMEOUT_SECONDS),
                 )
             ) as who_task,
+            _background(
+                ipx_source.request(
+                    self.transport,
+                    client,
+                    IPX_SELF_URL,
+                    timeout_seconds=self.transport.deadline(IPX_TIMEOUT_SECONDS),
+                )
+            ) as ipx_task,
         ):
             page, trace = await asyncio.gather(
                 coffee.request(
@@ -192,6 +204,11 @@ class CoffeeCollector:
                 ipure = _missing_result("", reason, skipped=True)
                 ipqs = _missing_result("", reason, skipped=True)
             who = await who_task
+            ipx = (
+                await ipx_source.for_exit_ip(self.transport.proxy_url, await ipx_task, exit_ip)
+                if exit_ip
+                else _missing_result("", "未取得出口 IP", skipped=True)
+            )
 
         status = _node_status(
             page,
@@ -204,6 +221,7 @@ class CoffeeCollector:
                 "ping_check": ping_check,
                 "ipure": ipure,
                 "ipqs": ipqs,
+                "ipx": ipx,
                 "who": who,
                 **(
                     {"related": related}
@@ -217,7 +235,7 @@ class CoffeeCollector:
         # 没有出口 IP 时 who 的失败只是同一个连接故障的回声，不再并入失败原因。
         error = _combined_error(
             page, trace, lookup, global_ping, port_scan, ping_check, related, ipure, ipqs,
-            *((who,) if exit_ip else ()),
+            *((who, ipx) if exit_ip else ()),
         )
         request_results = {
             "page": page,
@@ -229,6 +247,7 @@ class CoffeeCollector:
             "related": related,
             "ipure": ipure,
             "ipqs": ipqs,
+            "ipx": ipx,
             "who": who,
         }
         completeness = _completeness(request_results, exit_ip, lookup_data)
@@ -251,6 +270,7 @@ class CoffeeCollector:
             "ipure_report_url": _ipure_field(ipure, "report_url"),
             "gpt_check": gpt_check,
             **ipqs_source.ipqs_fields(ipqs),
+            **ipx_source.ipx_fields(ipx),
         }
         finished_at = _now()
 
@@ -288,6 +308,7 @@ class CoffeeCollector:
                 "ipure_budget_remaining": ipure.get("budget_remaining"),
                 "ipure_via_direct_fallback": bool(ipure.get("direct_fallback")),
                 "ipqs_via_direct_fallback": bool(ipqs.get("direct_fallback")),
+                "ipx_via_direct_fallback": bool(ipx.get("direct_fallback")),
             },
             "completeness": completeness,
             "requests": {
@@ -509,6 +530,7 @@ def _completeness(
         "ping_check_recorded": _request_recorded(requests["ping_check"]),
         "ipure_recorded": _request_recorded(requests["ipure"]),
         "ipqs_recorded": _request_recorded(requests["ipqs"]),
+        "ipx_recorded": _request_recorded(requests["ipx"]),
         "who_recorded": _request_recorded(requests["who"]),
         "related_recorded": (
             _request_recorded(requests["related"])
@@ -541,7 +563,7 @@ def _request_recorded(result: dict[str, Any]) -> bool:
     )
 
 
-_ENRICHMENT_HOSTS = frozenset({IPURE_HOST, IPQS_HOST, WHO_HOST})
+_ENRICHMENT_HOSTS = frozenset({IPURE_HOST, IPQS_HOST, IPX_HOST, WHO_HOST})
 
 
 def _combined_error(*results: dict[str, Any]) -> str | None:

@@ -25,6 +25,11 @@ WHO_ORIGIN = f"https://{WHO_HOST}"
 WHO_ME_URL = f"{WHO_ORIGIN}/api/me"
 WHO_TIMEOUT_SECONDS = 10.0
 WHO_MAX_RESPONSE_BYTES = 64_000
+IPX_HOST = "ipx.al"
+IPX_ORIGIN = f"https://{IPX_HOST}"
+IPX_SELF_URL = f"{IPX_ORIGIN}/json"
+IPX_TIMEOUT_SECONDS = 20.0
+IPX_MAX_RESPONSE_BYTES = 256_000
 GPT_PROBE_TARGETS = [
     {"name": "chatgpt.com", "url": "https://chatgpt.com/cdn-cgi/trace"},
     {"name": "api.openai.com", "url": "https://api.openai.com/v1/models"},
@@ -240,6 +245,26 @@ def _validate_ipure_url(url: str) -> None:
 def _validate_who_url(url: str) -> None:
     if url != WHO_ME_URL:
         raise ValueError(f"拒绝未允许的 1ms who 请求：{url}")
+
+
+def _validate_ipx_url(url: str) -> None:
+    """Only the caller's own report (`/json`) or one IP's report (`/api/report/{ip}`)."""
+
+    if url == IPX_SELF_URL:
+        return
+    parsed = urlsplit(url)
+    prefix = "/api/report/"
+    if (
+        f"{parsed.scheme}://{parsed.netloc}" != IPX_ORIGIN
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith(prefix)
+    ):
+        raise ValueError(f"拒绝未允许的 ipx.al 请求：{url}")
+    try:
+        ipaddress.ip_address(unquote(parsed.path.removeprefix(prefix)))
+    except ValueError as exc:
+        raise ValueError(f"ipx.al IP 参数无效：{url}") from exc
 
 
 def _validate_ipqs_url(url: str) -> None:
