@@ -27,12 +27,10 @@ from .coffee import (
     _profile_summary,
     _related_domains,
     _trace_ip,
-    _without_data,
 )
 from .gpt_checks import _gpt_check_summary
 from .http import (
     COFFEE_ORIGIN,
-    COFFEE_PAGE_URL,
     COFFEE_TRACE_URL,
     IPQS_HOST,
     IPQS_TIMEOUT_SECONDS,
@@ -40,15 +38,15 @@ from .http import (
     IPURE_ORIGIN,
     IPURE_TIMEOUT_SECONDS,
     IPX_HOST,
+    IPX_ORIGIN,
     IPX_SELF_URL,
     IPX_TIMEOUT_SECONDS,
     WHO_HOST,
     WHO_ME_URL,
-    WHO_ORIGIN,
     WHO_TIMEOUT_SECONDS,
     ProxyTransport,
 )
-from .ipure import _ipure_field, _ipure_scores, _ipure_url
+from .ipure import IPURE_NOT_INDEXED, _ipure_field, _ipure_scores, _ipure_url
 from .values import _clean_text
 
 
@@ -69,21 +67,12 @@ class CoffeeCollector:
         mihomo_instance: str,
         on_exit_ip: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
-        """on_exit_ip：trace 确认出口 IP、开始等 IP 资料的那一刻回调一次（只给实时进度用）。"""
+        """on_exit_ip：出口 IP 定下、开始等 IP 资料的那一刻回调一次（只给实时进度用）。"""
         started_at = _now()
         started = perf_counter()
-        # 不需要出口 IP 的请求（页面、trace、who、ipx /json、GPT 探测）在第 0 秒一起发出。
+        # 不需要出口 IP 的请求（trace、who、ipx /json、GPT 探测）在第 0 秒一起发出。
         async with (
             self.transport.client() as client,
-            _background(
-                coffee.request(
-                    self.transport,
-                    client,
-                    COFFEE_PAGE_URL,
-                    payload="html",
-                    timeout_seconds=self.transport.deadline(12),
-                )
-            ) as page_task,
             _background(
                 coffee.request(
                     self.transport,
@@ -124,12 +113,9 @@ class CoffeeCollector:
                         lookup = {
                             **lookup,
                             "ok": False,
-                            "error": "IP lookup 未返回与 Coffee trace 一致的 IP 数据",
+                            "error": "Coffee lookup 未返回与出口 IP 一致的数据",
                         }
                         lookup_data = {}
-                    related = await coffee.related_result(
-                        self.transport, client, exit_ip, lookup_data
-                    )
                     global_ping = await stage.tasks["global_ping"]
                     port_scan = await stage.tasks["port_scan"]
                     ping_check = await stage.tasks["ping_check"]
@@ -140,65 +126,43 @@ class CoffeeCollector:
                 finally:
                     await stage.cancel()
             else:
-                lookup = _missing_result("", "Coffee trace 未返回出口 IP", skipped=True)
-                lookup_data = {}
                 reason = "未取得出口 IP"
+                lookup = _missing_result("", reason, skipped=True)
+                lookup_data = {}
                 global_ping = _missing_result("", reason, skipped=True)
                 port_scan = _missing_result("", reason, skipped=True)
                 ping_check = _missing_result("", reason, skipped=True)
-                related = _missing_result("", reason, skipped=True)
                 ipure = _missing_result("", reason, skipped=True)
                 ipqs = _missing_result("", reason, skipped=True)
                 ipx = _missing_result("", reason, skipped=True)
-            page = await page_task
             who = await who_task
 
-        status = _node_status(
-            page,
-            trace,
-            lookup,
-            exit_ip,
-            {
-                "global_ping": global_ping,
-                "port_scan": port_scan,
-                "ping_check": ping_check,
-                "ipure": ipure,
-                "ipqs": ipqs,
-                "ipx": ipx,
-                "who": who,
-                **(
-                    {"related": related}
-                    if lookup_data.get("related_pending")
-                    or lookup_data.get("related_domains_pending")
-                    else {}
-                ),
-            },
-        )
-        final_exit_ip = exit_ip if status != "failed" else None
-        # 没有出口 IP 时 who 的失败只是同一个连接故障的回声，不再并入失败原因。
-        error = _combined_error(
-            page, trace, lookup, global_ping, port_scan, ping_check, related, ipure, ipqs,
-            *((who, ipx) if exit_ip else ()),
-        )
         request_results = {
-            "page": page,
             "trace": trace,
             "lookup": lookup,
             "global_ping": global_ping,
             "port_scan": port_scan,
             "ping_check": ping_check,
-            "related": related,
             "ipure": ipure,
             "ipqs": ipqs,
             "ipx": ipx,
             "who": who,
         }
         completeness = _completeness(request_results, exit_ip, lookup_data)
+        status = _node_status(exit_ip, completeness)
+        final_exit_ip = exit_ip or None
+        # 没有出口 IP 时 who / ipx 的失败只是同一个连接故障的回声，不再并入失败原因。
+        error = _combined_error(
+            trace, lookup, global_ping, port_scan, ping_check, ipure, ipqs,
+            *((who, ipx) if exit_ip else ()),
+        )
         gpt_check = _gpt_check_summary(gpt_requests, lookup_data)
         coffee_summary = _profile_summary(lookup_data)
         ipure_scores = _ipure_scores(ipure)
         identity = _network_identity(
-            exit_ip if status != "failed" else "",
+            exit_ip,
+            stage.source if stage is not None else "",
+            ipx.get("data"),
             who.get("data"),
             _ipure_field(ipure, "network"),
             ipqs.get("data"),
@@ -224,7 +188,6 @@ class CoffeeCollector:
             "node": node_name,
             "type": node_type,
             "selected_proxy": selected_proxy,
-            "coffee_page_url": COFFEE_PAGE_URL,
             "status": status,
             "error": error,
             "transport_error": None,
@@ -235,7 +198,7 @@ class CoffeeCollector:
             "global_ping": _global_ping_summary(global_ping),
             "port_scan": _port_scan_summary(port_scan),
             "ping_check": _ping_check_summary(ping_check),
-            "related_domains": _related_domains(lookup_data, related),
+            "related_domains": _related_domains(lookup_data),
             "elapsed_ms": round((perf_counter() - started) * 1000),
             "proxy_evidence": {
                 "transport": "workspace_mihomo_mixed_port",
@@ -246,7 +209,9 @@ class CoffeeCollector:
                 "selection_confirmed": selected_proxy == node_name,
                 "target_origin": COFFEE_ORIGIN,
                 "enrichment_origin": IPURE_ORIGIN,
-                "identity_origin": WHO_ORIGIN,
+                "identity_origin": IPX_ORIGIN,
+                # 出口 IP 是谁先定下的：Coffee trace，trace 没给出时退回 ipx / who 的回显。
+                "exit_ip_source": (stage.source or None) if stage is not None else None,
                 "trust_env": False,
                 "ipure_budget_remaining": ipure.get("budget_remaining"),
                 "ipure_via_direct_fallback": bool(ipure.get("direct_fallback")),
@@ -259,28 +224,12 @@ class CoffeeCollector:
                 "gpt_check": gpt_check,
             },
             "coffee": {
-                "page": page.get("data"),
                 "trace": trace.get("data"),
                 "lookup": lookup.get("data"),
                 "global_ping": global_ping.get("data"),
                 "port_scan": port_scan.get("data"),
                 "ping_check": ping_check.get("data"),
-                "related": related.get("data"),
                 "gpt_check": gpt_check,
-            },
-            "pages": {
-                "ip": {
-                    "name": "ip",
-                    "url": COFFEE_PAGE_URL,
-                    "status": status,
-                    "exit_ip": final_exit_ip,
-                    "score": summary["coffee_score"],
-                    "page_request": _without_data(page),
-                    "trace": trace,
-                    "lookup_request": _without_data(lookup),
-                    "result": lookup_data or None,
-                    "error": error,
-                },
             },
         }
 
@@ -291,35 +240,47 @@ class CoffeeCollector:
         who_task: asyncio.Task[Any],
         ipx_task: asyncio.Task[Any],
     ) -> tuple[str, _IpStage | None]:
-        """等 trace 定出口 IP；期间 who / ipx /json 谁先回显 IP，就先拿它开跑按 IP 查询的请求。
+        """定出口 IP；期间 who / ipx /json 谁先回显 IP，就先拿它开跑按 IP 查询的请求。
 
-        trace 仍是出口 IP 的唯一判据：它给的 IP 与抢跑用的不一致（多出口节点），抢跑的
-        请求整组作废、按 trace 的 IP 重发；trace 没给出 IP，抢跑的请求同样作废。
+        trace 给出 IP 时以它为准：与抢跑用的不一致（多出口节点）就整组作废、按 trace 重发。
+        trace 没给出 IP（Coffee 不通或限流）时，退回节点代理上的回显——抢跑那组的 IP，
+        或等 ipx / who 答完取第一个回显（ipx 优先）。它们问的都是「这条连接的出口」，
+        所以一家上游出故障不会让整个节点判失败。
         """
 
         stage: _IpStage | None = None
-        echo_tasks = (who_task, ipx_task)
-        pending: set[asyncio.Task[Any]] = {trace_task, *echo_tasks}
+        echo_tasks = {"ipx": ipx_task, "who": who_task}
+        pending: set[asyncio.Task[Any]] = {trace_task, *echo_tasks.values()}
         try:
             while not trace_task.done():
                 done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                for task in echo_tasks:
+                for name, task in echo_tasks.items():
                     if stage is None and task in done and (ip := _echoed_ip(task.result())):
-                        stage = self._start_ip_stage(client, ip, ipx_task)
+                        stage = self._start_ip_stage(client, ip, name, ipx_task)
             exit_ip = _trace_ip(trace_task.result().get("data"))
-            if stage is not None and stage.ip != exit_ip:
-                await stage.cancel()
-                stage = None
-            if exit_ip and stage is None:
-                stage = self._start_ip_stage(client, exit_ip, ipx_task)
-            return exit_ip, stage
+            if exit_ip:
+                if stage is not None and stage.ip != exit_ip:
+                    await stage.cancel()
+                    stage = None
+                if stage is None:
+                    stage = self._start_ip_stage(client, exit_ip, "trace", ipx_task)
+                else:
+                    stage.source = "trace"
+                return exit_ip, stage
+            if stage is None:
+                await asyncio.wait(echo_tasks.values())
+                for name, task in echo_tasks.items():
+                    if ip := _echoed_ip(task.result()):
+                        stage = self._start_ip_stage(client, ip, name, ipx_task)
+                        break
+            return (stage.ip if stage is not None else ""), stage
         except BaseException:
             if stage is not None:
                 await stage.cancel()
             raise
 
     def _start_ip_stage(
-        self, client: httpx.AsyncClient, ip: str, ipx_task: asyncio.Task[Any]
+        self, client: httpx.AsyncClient, ip: str, source: str, ipx_task: asyncio.Task[Any]
     ) -> _IpStage:
         async def ipx_report() -> dict[str, Any]:
             # shield：这一组作废时只取消按 IP 的补查，不能连带取消第 0 秒发出的 ipx /json。
@@ -336,7 +297,8 @@ class CoffeeCollector:
             )
 
         coroutines = {
-            "lookup": request(f"{COFFEE_ORIGIN}/api/ip/lookup/{quote(ip, safe='')}", 45),
+            # 实测 p90 0.9s、最慢 2.1s；旧的 45 秒上限只会让卡住的 lookup 占着整个节点。
+            "lookup": request(f"{COFFEE_ORIGIN}/api/ip/lookup/{quote(ip, safe='')}", 10),
             "global_ping": request(_global_ping_url(ip), 8),
             "port_scan": request(f"{COFFEE_ORIGIN}/api/ip/portscan/{ip}?probe=0", 8),
             "ping_check": request(f"{COFFEE_ORIGIN}/api/ip/pingcheck/{ip}", 8),
@@ -354,14 +316,20 @@ class CoffeeCollector:
             ),
             "ipx": ipx_report(),
         }
-        return _IpStage(ip, {name: asyncio.create_task(c) for name, c in coroutines.items()})
+        return _IpStage(
+            ip, source, {name: asyncio.create_task(c) for name, c in coroutines.items()}
+        )
 
 
 @dataclass(slots=True)
 class _IpStage:
-    """一组按出口 IP 的请求（lookup / ping / 端口 / IPure / IPQS / ipx 核对），可整组作废。"""
+    """一组按出口 IP 的请求（lookup / ping / 端口 / IPure / IPQS / ipx 核对），可整组作废。
+
+    source：这个 IP 由谁定下（trace / ipx / who）。
+    """
 
     ip: str
+    source: str
     tasks: dict[str, asyncio.Task[Any]]
 
     async def cancel(self) -> None:
@@ -396,24 +364,30 @@ async def _background(coro: Coroutine[Any, Any, Any]) -> AsyncIterator[asyncio.T
 
 def _network_identity(
     exit_ip: str,
+    exit_ip_source: str,
+    ipx_data: Any,
     who_data: Any,
     ipure_network: Any,
     ipqs_data: Any,
     coffee_summary: dict[str, Any],
 ) -> dict[str, Any]:
-    """出口 IP / 国家和地区 / 服务商 / 服务器名：1ms who 优先，不再回落 Coffee。
+    """出口 IP / 国家和地区 / 服务商 / 服务器名 / 接入 / 原生性：ipx.al 优先。
 
-    地区与服务商：who（经节点代理问 Cloudflare 看到的连接本身）→ 1ms IPQS 多源共识 → IPure。
-    who 回显的 ip 必须与 trace 出口一致才采信：多出口节点上两次连接可能走不同地址，
-    那时 who 说的是另一个 IP，整组让给按 IP 查询的来源。
-    服务器名（rdns）：who 的 PTR → 1ms 共识的 host。
-    接入与原生性：1ms IPQS 多源共识 → IPure → Coffee（这两组 who 不提供）。
+    每一组的顺序：
+    - 地区：ipx → who（经节点代理问 Cloudflare）→ 1ms IPQS 共识 → IPure；
+    - 服务商：ipx（ASN + RIR 组织名）→ who → 1ms IPQS → IPure；
+    - 服务器名（rdns）：ipx hostname → who PTR → 1ms host；
+    - 接入与原生性：ipx（多源投票）→ 1ms IPQS → IPure → Coffee。
+    ipx 与 who 的回显 IP 必须与出口 IP 一致才采信：多出口节点上两次连接可能走不同地址，
+    那时它们说的是另一个 IP（ipx 已在 `for_exit_ip` 里改为按 IP 查询，who 则整组让出）。
 
-    出口 IP 仍以 Coffee trace 为准（who / ipx 先回显时按 IP 查询可以抢跑，不一致即作废重发），
-    who / IPure 回显一致时记为由它确认。每一组各自记来源（network_source），
-    页面与审计都能看出这一格是谁说的。
+    exit_ip 的来源记的是「谁确认了它」：ipx / who 回显一致时记它，否则记定下它的那一家
+    （trace 记为 coffee）。每一组各自记来源（network_source），页面与审计都能看出这一格是谁说的。
     """
 
+    ipx = ipx_data if isinstance(ipx_data, dict) else {}
+    if not (exit_ip and _is_same_ip(ipx.get("ip"), exit_ip)):
+        ipx = {}
     who = who_data if isinstance(who_data, dict) else {}
     if not (exit_ip and _is_same_ip(who.get("ip"), exit_ip)):
         who = {}
@@ -424,16 +398,25 @@ def _network_identity(
 
     if not exit_ip:
         source["exit_ip"] = None
+    elif ipx:
+        source["exit_ip"] = "ipx"
     elif who:
         source["exit_ip"] = "who"
     elif network.get("ip") and _is_same_ip(network.get("ip"), exit_ip):
         source["exit_ip"] = "ipure"
     else:
-        source["exit_ip"] = "coffee"
+        source["exit_ip"] = "coffee" if exit_ip_source == "trace" else exit_ip_source or None
 
     # 地区组：国家代码在哪个来源，整组就用哪个来源。国名只有 IPure 给，代码一致时借用；
-    # 否则留空，页面按国家代码本地化显示。
-    if who.get("country_code"):
+    # 否则留空，页面按国家代码本地化显示。ipx 不给省/州，who 同国时借它的 region。
+    if ipx.get("country_code"):
+        source["geo"] = "ipx"
+        geo = {
+            "country_code": ipx["country_code"],
+            "region": who.get("region") if who.get("country_code") == ipx["country_code"] else None,
+            "city": ipx.get("city"),
+        }
+    elif who.get("country_code"):
         source["geo"] = "who"
         geo = {
             "country_code": who["country_code"],
@@ -463,7 +446,12 @@ def _network_identity(
     # 服务商组：ISP 显示运营这段地址的组织，AS 组织显示 AS 名；ASN 相同时借用 IPure 清洗过的 AS 名。
     ipure_isp = network.get("org") or network.get("as_name") or network.get("registry_org")
     ipure_as_name = network.get("as_name") or network.get("registry_org") or ipure_isp
-    if who.get("asn") or who.get("as_org"):
+    if ipx.get("asn") or ipx.get("isp"):
+        source["isp"] = "ipx"
+        identity["asn"] = ipx.get("asn")
+        identity["isp"] = ipx.get("isp") or ""
+        identity["as_org"] = ipx.get("as_org") or ipx.get("isp") or ""
+    elif who.get("asn") or who.get("as_org"):
         source["isp"] = "who"
         identity["asn"] = who.get("asn")
         identity["isp"] = who.get("as_org") or ""
@@ -486,37 +474,39 @@ def _network_identity(
         source["isp"] = None
         identity.update(asn=None, isp="", as_org="")
 
-    identity["rdns"] = who.get("ptr") or ipqs.get("host") or "-"
+    identity["rdns"] = ipx.get("hostname") or who.get("ptr") or ipqs.get("host") or "-"
 
-    # 接入：六档（住宅 / 移动 / 商业 / 机房 / 教育 / 政府），1ms → IPure → Coffee。
-    if ipqs.get("type"):
-        source["kind"] = "ipqs"
-        identity["usage_type"] = ipqs["type"]
-        identity["is_residential"] = ipqs["type"] in ("residential", "mobile")
-        identity["is_datacenter"] = ipqs["type"] == "hosting"
-    elif network.get("usage_type"):
-        source["kind"] = "ipure"
-        identity["usage_type"] = network["usage_type"]
-        identity["is_residential"] = network["is_residential"]
-        identity["is_datacenter"] = network["usage_type"] == "hosting"
+    # 接入：六档（住宅 / 移动 / 商业 / 机房 / 教育 / 政府），ipx → 1ms → IPure → Coffee。
+    for name, usage, residential in (
+        ("ipx", ipx.get("usage_type"), None),
+        ("ipqs", ipqs.get("type"), None),
+        ("ipure", network.get("usage_type"), network.get("is_residential")),
+    ):
+        if usage:
+            source["kind"] = name
+            identity["usage_type"] = usage
+            identity["is_residential"] = (
+                residential if residential is not None else usage in ("residential", "mobile")
+            )
+            identity["is_datacenter"] = usage == "hosting"
+            break
     else:
         source["kind"] = (
             "coffee" if isinstance(coffee_summary.get("is_residential"), bool) else None
         )
 
-    # 原生性：1ms → IPure → Coffee；广播时用登记国补出「广播 IP (XX)」。
-    if isinstance(ipqs.get("native"), bool):
-        source["native"] = "ipqs"
-        identity["is_native"] = ipqs["native"]
-        _describe_native(
-            identity, ipqs["native"], ipqs.get("registered_country"), ipqs.get("country")
-        )
-    elif isinstance(network.get("is_native"), bool):
-        source["native"] = "ipure"
-        identity["is_native"] = network["is_native"]
-        _describe_native(
-            identity, network["is_native"], network.get("registered_country"), geo["country_code"]
-        )
+    # 原生性：ipx → 1ms → IPure → Coffee；广播时用登记国补出「广播 IP (XX)」。
+    for name, native, registered, located in (
+        ("ipx", ipx.get("native"), ipx.get("registered_country"), geo["country_code"]),
+        ("ipqs", ipqs.get("native"), ipqs.get("registered_country"), ipqs.get("country")),
+        ("ipure", network.get("is_native"), network.get("registered_country"),
+         geo["country_code"]),
+    ):
+        if isinstance(native, bool):
+            source["native"] = name
+            identity["is_native"] = native
+            _describe_native(identity, native, registered, located)
+            break
     else:
         source["native"] = "coffee" if isinstance(coffee_summary.get("is_native"), bool) else None
 
@@ -539,19 +529,22 @@ def _describe_native(
     )
 
 
-def _node_status(
-    page: dict[str, Any],
-    trace: dict[str, Any],
-    lookup: dict[str, Any],
-    exit_ip: str,
-    optional: dict[str, dict[str, Any]] | None = None,
-) -> str:
-    required_ok = bool(page.get("ok") and trace.get("ok") and lookup.get("ok") and exit_ip)
-    if not required_ok:
+# 页面上各占一列的分数来源：缺了才让节点降为「部分」。key 是 completeness.checks 里的名字。
+# who、全球 Ping、端口、连通检测只作证据（身份已由 ipx 优先给出），缺了不影响状态。
+_SCORE_CHECKS = {
+    "ipx": "ipx_recorded",
+    "lookup": "lookup_received",
+    "ipqs": "ipqs_recorded",
+    "ipure": "ipure_recorded",
+}
+
+
+def _node_status(exit_ip: str, completeness: dict[str, Any]) -> str:
+    """没有出口 IP 才算失败；有出口 IP 而缺了某个分数来源，算部分。"""
+
+    if not exit_ip:
         return "failed"
-    if optional and any(not _request_recorded(item) for item in optional.values()):
-        return "partial"
-    return "success"
+    return "partial" if completeness["partial_reasons"] else "success"
 
 
 def _completeness(
@@ -560,11 +553,10 @@ def _completeness(
     lookup_data: dict[str, Any],
 ) -> dict[str, Any]:
     checks = {
-        "page_received": bool(requests["page"].get("ok")),
         "trace_received": bool(requests["trace"].get("ok")),
         "exit_ip_valid": bool(exit_ip),
         "lookup_received": bool(requests["lookup"].get("ok")),
-        "lookup_matches_trace": bool(exit_ip and _is_same_ip(lookup_data.get("ip"), exit_ip)),
+        "lookup_matches_exit_ip": bool(exit_ip and _is_same_ip(lookup_data.get("ip"), exit_ip)),
         "global_ping_recorded": _request_recorded(requests["global_ping"]),
         "port_scan_recorded": _request_recorded(requests["port_scan"]),
         "ping_check_recorded": _request_recorded(requests["ping_check"]),
@@ -572,28 +564,25 @@ def _completeness(
         "ipqs_recorded": _request_recorded(requests["ipqs"]),
         "ipx_recorded": _request_recorded(requests["ipx"]),
         "who_recorded": _request_recorded(requests["who"]),
-        "related_recorded": (
-            _request_recorded(requests["related"])
-            if lookup_data.get("related_pending") or lookup_data.get("related_domains_pending")
-            else True
-        ),
     }
-    required = (
-        "page_received",
-        "trace_received",
-        "exit_ip_valid",
-        "lookup_received",
-        "lookup_matches_trace",
-    )
-    missing = [name for name in required if not checks[name]]
+    missing = [] if checks["exit_ip_valid"] else ["exit_ip_valid"]
     unrecorded = [
         name for name, value in checks.items() if name.endswith("_recorded") and not value
     ]
+    # IPure 明确答复「没收录这个 IP」是上游对这个地址的结论，不是采集缺口。
+    partial_reasons = [
+        check
+        for name, check in _SCORE_CHECKS.items()
+        if exit_ip
+        and not checks[check]
+        and requests[name].get("error_type") != IPURE_NOT_INDEXED
+    ]
     return {
-        "complete": not missing and not unrecorded,
+        "complete": not missing and not unrecorded and checks["lookup_received"],
         "checks": checks,
         "missing_required": missing,
         "unrecorded_requests": unrecorded,
+        "partial_reasons": partial_reasons,
     }
 
 

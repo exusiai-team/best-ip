@@ -362,7 +362,12 @@ async def _run_scan(
             follow_task = None
             final_counts = job_counts(manager.jobs.get(job_id))
             final_nodes = live_nodes(read_nodes(), forbidden)
-            print(_timing_summary(download_ms, job, final_nodes), file=sys.stderr)
+            print(
+                _timing_summary(
+                    download_ms, job, final_nodes, _read_records(manager, job_id, job)
+                ),
+                file=sys.stderr,
+            )
             if reporter is not None and job.get("status") == "completed":
                 await reporter.report("packaging", final_counts, final_nodes)
             if job.get("cleanup_confirmed") is not True:
@@ -416,11 +421,73 @@ def _seconds(ms: float) -> str:
     return f"{ms / 1000:.1f}s"
 
 
-def _timing_summary(download_ms: int, job: Any, nodes: list[dict[str, Any]] | None) -> str:
+# scan_timing 里逐源统计的请求（顺序即输出顺序）。
+_TIMED_SOURCES = (
+    "trace", "ipx", "ipqs", "ipure", "lookup", "who", "global_ping", "port_scan", "ping_check",
+)
+
+
+def _read_records(manager: Any, job_id: str, job: Any) -> list[dict[str, Any]]:
+    """完成的任务读回全部节点记录，只给 scan_timing 统计用；读不到就不统计。"""
+
+    store = getattr(manager, "result_store", None)
+    total = job.get("total") if isinstance(job, dict) else None
+    if store is None or job.get("status") != "completed" or not isinstance(total, int):
+        return []
+    try:
+        return [store.read_node(job_id, index) for index in range(total)]
+    except Exception:
+        return []
+
+
+def _source_timing(records: list[dict[str, Any]]) -> list[str]:
+    """逐源 p50/p90/max、直连兜底次数与出口 IP 重复度；只有数字，不含 IP 本身。
+
+    产物 1 天后过期，事后定位长尾在哪个上游、是否值得按出口 IP 去重，都只能靠这一行。
+    """
+
+    if not records:
+        return []
+    timings: list[str] = []
+    fallbacks: list[str] = []
+    for name in _TIMED_SOURCES:
+        requests = [
+            record["requests"][name]
+            for record in records
+            if isinstance(record.get("requests"), dict)
+            and isinstance(record["requests"].get(name), dict)
+            and record["requests"][name].get("attempted")
+        ]
+        elapsed = sorted(int(item.get("elapsed_ms") or 0) for item in requests)
+        if not elapsed:
+            continue
+        p50 = elapsed[len(elapsed) // 2]
+        p90 = elapsed[min(len(elapsed) - 1, len(elapsed) * 9 // 10)]
+        ok = sum(1 for item in requests if item.get("ok") is True)
+        timings.append(
+            f"{name}={ok}/{len(elapsed)}:{_seconds(p50)}/{_seconds(p90)}/{_seconds(elapsed[-1])}"
+        )
+        direct = sum(1 for item in requests if item.get("direct_fallback") is True)
+        if direct:
+            fallbacks.append(f"{name}={direct}")
+    exit_ips = [record.get("exit_ip") for record in records if record.get("exit_ip")]
+    parts = [f"sources[{' '.join(timings)}]"]
+    if fallbacks:
+        parts.append(f"direct_fallback[{' '.join(fallbacks)}]")
+    parts.append(f"exit_ips={len(exit_ips)} unique_exit_ips={len(set(exit_ips))}")
+    return parts
+
+
+def _timing_summary(
+    download_ms: int,
+    job: Any,
+    nodes: list[dict[str, Any]] | None,
+    records: list[dict[str, Any]] | None = None,
+) -> str:
     """一行聚合耗时，给 Actions 日志找瓶颈用：只有数字，没有节点名、出口 IP 或订阅内容。
 
     节点用时取逐节点实时快照的 ms（含被丢弃的失败尝试），phase_sum 是各节点各相之和
-    （并行下会远大于墙钟，看的是比例）。
+    （并行下会远大于墙钟，看的是比例）。sources 是各上游「成功数/请求数:p50/p90/max」。
     """
 
     metrics = job.get("metrics") if isinstance(job, dict) else None
@@ -445,6 +512,7 @@ def _timing_summary(download_ms: int, job: Any, nodes: list[dict[str, Any]] | No
     if isinstance(phase_ms, dict):
         sums = " ".join(f"{name}={_seconds(int(value))}" for name, value in phase_ms.items())
         parts.append(f"phase_sum[{sums}]")
+    parts += _source_timing(records or [])
     return "scan_timing: " + " ".join(parts)
 
 

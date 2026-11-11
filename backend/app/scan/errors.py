@@ -82,10 +82,6 @@ def _attach_mihomo_error(result: dict[str, Any], mihomo: MihomoProcess, offset: 
     transport_error = _summarize_mihomo_error(message) if message else "节点传输连接失败"
     result["transport_error"] = transport_error
     result["error"] = _merge_error(result.get("error"), transport_error)
-    pages = result.get("pages")
-    ip_page = pages.get("ip") if isinstance(pages, dict) else None
-    if isinstance(ip_page, dict):
-        ip_page["error"] = result["error"]
 
 
 def _failed_node(
@@ -132,7 +128,7 @@ def _failed_node(
         "coffee": {"gpt_check": []},
         "completeness": {
             "complete": False,
-            "required": {"page": False, "trace": False, "lookup": False},
+            "required": {"exit_ip": False},
             "optional": {},
             "missing": ["selector_or_collector"],
         },
@@ -221,13 +217,15 @@ _LIVE_REASON_PATTERNS = (
     re.compile(r"Mihomo selector 切换失败（HTTP \d{3}）"),
     re.compile(r"节点采集失败（[A-Za-z]{1,40}）"),
 )
-# completeness.unrecorded_requests 的键 → 「部分」节点缺了哪几项。
+# completeness.partial_reasons 的键 → 「部分」节点缺了哪几项（旧记录退回 unrecorded_requests）。
 _LIVE_MISSING = {
+    "ipx_recorded": "ipx 健康分",
+    "lookup_received": "Coffee 评分",
+    "ipqs_recorded": "1ms 评分",
     "ipure_recorded": "IPure 评分",
     "global_ping_recorded": "全球 Ping",
     "port_scan_recorded": "端口扫描",
     "ping_check_recorded": "连通检测",
-    "related_recorded": "关联域名",
 }
 
 
@@ -253,7 +251,9 @@ def live_record_reason(record: dict[str, Any]) -> str | None:
         completeness = record.get("completeness")
         if not isinstance(completeness, dict):
             completeness = {}
-        missing = completeness.get("unrecorded_requests")
+        missing = completeness.get("partial_reasons")
+        if missing is None:
+            missing = completeness.get("unrecorded_requests")
         labels = [_LIVE_MISSING[key] for key in missing or [] if key in _LIVE_MISSING]
         return f"缺 {'、'.join(labels)}" if labels else "富化数据不完整"
     return None

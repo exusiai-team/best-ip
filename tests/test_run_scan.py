@@ -101,3 +101,24 @@ async def test_cli_scan_publishes_verified_artifact(tmp_path, capsys):
 
 def test_timing_summary_without_nodes():
     assert run_scan._timing_summary(812, {}, None) == "scan_timing: subscription=0.8s"
+
+
+def test_timing_summary_reports_sources_without_ips():
+    def record(ip, ipx_ms, direct=False):
+        return {
+            "exit_ip": ip,
+            "requests": {
+                "ipx": {"attempted": True, "ok": True, "elapsed_ms": ipx_ms,
+                        "direct_fallback": direct},
+                "trace": {"attempted": True, "ok": ip is not None, "elapsed_ms": 1000},
+            },
+        }
+
+    records = [record("203.0.113.1", 4000), record("203.0.113.1", 6000, direct=True),
+               record(None, 0)]
+    line = run_scan._timing_summary(0, {}, None, records)
+    assert "trace=2/3:1.0s/1.0s/1.0s" in line
+    assert "ipx=3/3:4.0s/6.0s/6.0s" in line
+    assert "direct_fallback[ipx=1]" in line
+    assert "exit_ips=2 unique_exit_ips=1" in line
+    assert "203.0.113" not in line

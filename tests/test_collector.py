@@ -24,9 +24,12 @@ def _ip_in(url):
 
 
 class _Upstream:
-    """Fake every source; trace answers after `trace_delay`, who echoes `who_ip` at once."""
+    """Fake every source; trace answers after `trace_delay`, who echoes `who_ip` at once,
+    ipx `/json` echoes `ipx_ip` after 0.2s; IPure answers `ipure_result` when given."""
 
-    def __init__(self, monkeypatch, *, trace_ip, who_ip, trace_delay=0.05):
+    def __init__(
+        self, monkeypatch, *, trace_ip, who_ip, ipx_ip="", trace_delay=0.05, ipure_result=None
+    ):
         self.calls: list[tuple[str, str, bool]] = []
         self.cancelled: list[str] = []
         self.trace_done = False
@@ -37,8 +40,6 @@ class _Upstream:
                 await asyncio.sleep(trace_delay)
                 upstream.trace_done = True
                 return _ok(url, f"ip={trace_ip}\n" if trace_ip else "h=x\n")
-            if url.endswith("/ip/"):
-                return _ok(url, "<html></html>")
             return await upstream.by_ip("coffee", url, {"ip": _ip_in(url)})
 
         async def who_request(transport, client, url, *, timeout_seconds):
@@ -46,12 +47,14 @@ class _Upstream:
 
         async def ipx_request(transport, client, url, *, timeout_seconds):
             await asyncio.sleep(0.2)
-            return _ok(url, None)
+            return _ok(url, {"ip": ipx_ip} if ipx_ip else None)
 
         async def ipx_for_exit_ip(proxy_url, proxied, exit_ip):
-            return _ok("ipx", {"ip": exit_ip})
+            return _ok("ipx", {"ip": exit_ip, "score": 80, "country_code": "JP", "asn": 2516})
 
         async def ipure_request(transport, client, url, *, timeout_seconds):
+            if ipure_result is not None:
+                return ipure_result
             return await upstream.by_ip("ipure", url, None)
 
         async def ipqs_request(transport, client, url, *, timeout_seconds):
@@ -60,12 +63,8 @@ class _Upstream:
         async def gpt_requests(transport, client):
             return {}
 
-        async def related_result(transport, client, exit_ip, lookup_data):
-            return _ok("related", None)
-
         module = collector_module
         monkeypatch.setattr(module.coffee, "request", coffee_request)
-        monkeypatch.setattr(module.coffee, "related_result", related_result)
         monkeypatch.setattr(module.who_source, "request", who_request)
         monkeypatch.setattr(module.ipx_source, "request", ipx_request)
         monkeypatch.setattr(module.ipx_source, "for_exit_ip", ipx_for_exit_ip)
@@ -112,15 +111,69 @@ async def test_mismatched_echo_is_discarded_and_rerun_for_trace_ip(monkeypatch):
     assert record["exit_ip"] == TRACE_IP
     assert record["requests"]["ipqs"]["data"] == {"ip": TRACE_IP}
     assert record["requests"]["lookup"]["data"] == {"ip": TRACE_IP}
-    assert record["requests"]["ipx"]["data"] == {"ip": TRACE_IP}
+    assert record["requests"]["ipx"]["data"]["ip"] == TRACE_IP
     assert {ip for _, ip, after_trace in upstream.calls if after_trace} == {TRACE_IP}
     assert "ipqs:" + OTHER_IP in upstream.cancelled
 
 
-async def test_no_trace_ip_discards_speculative_lookups(monkeypatch):
+async def test_no_trace_ip_falls_back_to_the_echoed_ip(monkeypatch):
     upstream = _Upstream(monkeypatch, trace_ip="", who_ip=OTHER_IP)
+    record = await _collect()
+    assert record["status"] != "failed"
+    assert record["exit_ip"] == OTHER_IP
+    assert record["proxy_evidence"]["exit_ip_source"] == "who"
+    assert record["requests"]["ipqs"]["data"] == {"ip": OTHER_IP}
+    assert not upstream.cancelled
+
+
+async def test_no_trace_ip_prefers_the_ipx_echo_over_who(monkeypatch):
+    _Upstream(monkeypatch, trace_ip="", who_ip="", ipx_ip=OTHER_IP)
+    record = await _collect()
+    assert record["exit_ip"] == OTHER_IP
+    assert record["proxy_evidence"]["exit_ip_source"] == "ipx"
+    # 身份由 ipx 报告给出，出口 IP 记为 ipx 确认。
+    assert record["network_source"]["exit_ip"] == "ipx"
+    assert record["network_source"]["geo"] == "ipx"
+    assert record["country_code"] == "JP"
+    assert record["asn"] == 2516
+
+
+async def test_no_ip_anywhere_fails_and_skips_ip_lookups(monkeypatch):
+    upstream = _Upstream(monkeypatch, trace_ip="", who_ip="")
     record = await _collect()
     assert record["status"] == "failed"
     assert record["exit_ip"] is None
     assert record["requests"]["ipqs"]["skipped"] is True
-    assert "ipqs:" + OTHER_IP in upstream.cancelled
+    assert not upstream.calls
+
+
+async def test_coffee_page_and_related_are_no_longer_requested(monkeypatch):
+    _Upstream(monkeypatch, trace_ip=TRACE_IP, who_ip=TRACE_IP)
+    record = await _collect()
+    assert "page" not in record["requests"]
+    assert "related" not in record["requests"]
+    assert record["status"] == "success"
+    assert record["completeness"]["partial_reasons"] == []
+
+
+async def test_ipure_not_indexed_does_not_make_the_node_partial(monkeypatch):
+    not_indexed = {
+        "ok": False, "attempted": True, "status_code": 401, "url": "ipure", "data": None,
+        "error": "IPure 未收录该 IP", "error_type": "NotIndexed", "skipped": True,
+    }
+    _Upstream(monkeypatch, trace_ip=TRACE_IP, who_ip=TRACE_IP, ipure_result=not_indexed)
+    record = await _collect()
+    assert record["status"] == "success"
+    assert record["completeness"]["checks"]["ipure_recorded"] is False
+    assert record["score"] is None
+
+
+async def test_missing_score_source_makes_the_node_partial(monkeypatch):
+    failed = {
+        "ok": False, "attempted": True, "status_code": 500, "url": "ipure", "data": None,
+        "error": "HTTP 500", "error_type": "HTTPStatusError", "skipped": False,
+    }
+    _Upstream(monkeypatch, trace_ip=TRACE_IP, who_ip=TRACE_IP, ipure_result=failed)
+    record = await _collect()
+    assert record["status"] == "partial"
+    assert record["completeness"]["partial_reasons"] == ["ipure_recorded"]

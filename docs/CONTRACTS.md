@@ -188,7 +188,13 @@ Disk layout: `{job_id}/progress.json`, `nodes/0000.json` onward, `manifest.json`
 Files are atomically written. Exactly one terminal record per actual node, with
 status success/partial/failed. Failed records require a safe error and null exit IP.
 Success and partial require a valid IP and confirmed workspace Mihomo proxy
-evidence, loopback HTTP port, no trust_env, and five true base collection checks.
+evidence, loopback HTTP port, no trust_env, and `completeness.checks.exit_ip_valid:true`.
+A node fails only when no exit IP was found. With an exit IP it is `partial` when one of the
+four score sources that has a column — ipx (`ipx_recorded`), Coffee lookup
+(`lookup_received`), 1ms IPQS (`ipqs_recorded`), IPure (`ipure_recorded`) — has no answer;
+`completeness.partial_reasons` lists exactly those checks. who, global ping, portscan and
+pingcheck are evidence only and never change the status. The Coffee page (`/ip/`) and the
+related-domains poll are no longer requested (`related_domains` comes from lookup alone).
 `ipure_scores` is always a seven-key map — `total` plus the six documented
 scenarios `ai, social, streaming, gaming, ecommerce, email` — where every value is
 an integer 0..100, the sentinel `-1`, or null, and `score` must equal
@@ -206,7 +212,9 @@ Migration: earlier versions wrote `ipure_level`, `ipure_verdict` and
 (`_RETIRED_NODE_FIELDS`, `retired`) so results and exports written before the
 change still open; they are never written again, and that tolerance can go once
 `RUNTIME_DIR/results` holds no pre-change job.
-IPure requires no API key or Cookie, so no fallback session evidence exists. A score may
+IPure answers unindexed addresses on its anonymous endpoint with `401 invalid_api_key`;
+that is recorded as `requests.ipure.error_type:"NotIndexed"` (`skipped:true`, message
+「IPure 未收录该 IP」), leaves the score null and does not make the node partial. A score may
 come from the workspace proxy or, when the node egress cannot connect, from a recorded
 host-side query: such a record sets `requests.ipure.direct_fallback:true`,
 `via_mihomo:false`, and `proxy_evidence.ipure_via_direct_fallback:true`. Both validators
@@ -221,28 +229,35 @@ hosting · education · government · unknown) → `usage_type` (unknown and off
 become null) + `is_residential` (true only for residential); `nativeType` (native ·
 broadcast · unknown) → `native_type` + `is_native` (true / false / null).
 Anything missing or mistyped is null.
+Network identity is ipx-first. The exit IP comes from the proxied Coffee trace; when the
+trace names none (Coffee unreachable or rate-limited) it falls back to the proxied echo of
+ipx `/json`, then 1ms who — both describe the connection itself.
+`proxy_evidence.exit_ip_source` is `"trace"`, `"ipx"` or `"who"`. By-IP requests may start
+early on an echoed IP and are cancelled and reissued when the trace disagrees.
 1ms who (`https://who.1ms.dog/api/me`, through the node proxy, no host-side fallback because
 the answer describes the caller) is normalized into `requests.who.data`: `ip` (required),
 `cf.country` → `country_code`, `region`, `city`, `continent`, `timezone`, `asn`,
-`asOrganization` → `as_org`, `colo`, `ptr`; echoed request headers are dropped. Its answer
-is used only when `ip` equals the trace exit IP. The record fills the groups as follows —
-geo (`country_code`, `region`, `city`, `location`): who → 1ms consensus (`summary.cc/city`)
-→ IPure; `country` is IPure's English name only when its code matches, otherwise null (the
-frontend localizes from `country_code`). ISP (`isp`, `as_org`, `asn`): who
+`asOrganization` → `as_org`, `colo`, `ptr`; echoed request headers are dropped. ipx and who
+answers are used only when their `ip` equals the exit IP. The record fills the groups as
+follows — geo (`country_code`, `region`, `city`, `location`): ipx `location` (region borrowed
+from who when the country matches) → who → 1ms consensus (`summary.cc/city`) → IPure;
+`country` is IPure's English name only when its code matches, otherwise null (the frontend
+localizes from `country_code`). ISP (`isp`, `as_org`, `asn`): ipx (`asn`; `org` such as
+"AMAZON-02 - Amazon.com, Inc." → `as_org`, the part after " - " → `isp`) → who
 (`asOrganization`; `as_org` borrows IPure's cleaned AS name when the ASN matches) → 1ms
-consensus (`summary.asn/org`) → IPure. `rdns`: who `ptr` → 1ms `summary.host` → `"-"`.
-Kind (`usage_type`, `is_residential`, `is_datacenter` = hosting) and native (`is_native`,
-`native_status`, `native_detail`): 1ms IPQS → IPure → Coffee. Geo and ISP never fall back to
-Coffee. `network_source = {exit_ip, geo, isp, kind, native}` (each `"who"`, `"ipqs"`,
-`"ipure"`, `"coffee"` or null) says who supplied each group; `exit_ip` is decided by the
-Coffee trace (by-IP requests may start early on an IP echoed by who or ipx `/json`, but are
-cancelled and reissued when the trace disagrees) and marked `"who"` / `"ipure"` when that source echoed the same address. Any
-group credited to `"who"` requires `requests.who` with `ok:true`, `via_mihomo:true` and a
-`data.ip` equal to `exit_ip`. A missing who answer makes the node `partial`
-(`completeness.checks.who_recorded`). The identity fields are optional — artifacts
-written before them still validate — and the record validator rejects a non-string geo field, a
-`usage_type` outside the six documented values, or a `network_source` with other keys or
-values.
+consensus (`summary.asn/org`) → IPure. `rdns`: ipx `hostname` → who `ptr` → 1ms
+`summary.host` → `"-"`. Kind (`usage_type`, `is_residential`, `is_datacenter` = hosting):
+ipx `type.verdict` → 1ms IPQS → IPure → Coffee; native (`is_native`, `native_status`,
+`native_detail`): ipx `native.verdict` (+ `regCountry`) → 1ms IPQS → IPure → Coffee. Geo and
+ISP never fall back to Coffee. `network_source = {exit_ip, geo, isp, kind, native}` (each
+`"ipx"`, `"who"`, `"ipqs"`, `"ipure"`, `"coffee"` or null) says who supplied each group;
+`exit_ip` names the source that echoed the same address, else the one that decided it (trace
+→ `"coffee"`). Any group credited to `"ipx"` requires `requests.ipx` with `ok:true` and
+`data.ip` equal to `exit_ip`; any group credited to `"who"` requires `requests.who` with
+`ok:true`, `via_mihomo:true` and a `data.ip` equal to `exit_ip`. The identity fields are
+optional — artifacts written before them still validate — and the record validator rejects a
+non-string geo field, a `usage_type` outside the six documented values, or a
+`network_source` with other keys or values.
 1ms IPQS (`https://ipqs.1ms.dog/api/check?ip=`) streams NDJSON; only the terminal `done`
 event is read. Its `score` (integer 0..100) is the hard requirement; `grade` (A B C D F),
 consensus `type` (the same six usage values) and `native` follow, and anything off those
@@ -258,15 +273,17 @@ A missing 1ms report makes the node `partial` (`completeness.checks.ipqs_recorde
 these fields is in the manifest summary, so older manifests still verify.
 ipx.al is read the other way round: `GET https://ipx.al/json` through the node proxy asks for
 the caller's own report, so it starts together with the trace. It is accepted only when its
-echoed `ip` equals the trace exit IP; otherwise (or on any proxy failure) the host asks
+echoed `ip` equals the exit IP; otherwise (or on any proxy failure) the host asks
 `GET /api/report/{exit_ip}` directly, with `requests.ipx.direct_fallback` / `via_mihomo` /
 `proxy_evidence.ipx_via_direct_fallback` agreeing and the reason in `requests.ipx.proxy_error`
 (`IPMismatch` or the proxy error type). `health.score` (integer 0..100) and a valid `ip` are
 required; the record carries three optional fields `ipx_score`, `ipx_grade` (one of 极佳 良好 一般
 较差 高风险, never without a score) and `ipx_report_url` (`https://ipx.al/{ip}`). The validator
 also requires `requests.ipx.data.ip` to equal `exit_ip` and `data.score` to equal `ipx_score`.
-Items (negative `points` are deductions), ceiling, type and native verdict stay in
-`requests.ipx.data`. A missing ipx report makes the node `partial`
+`requests.ipx.data` also keeps the identity it reported — `country_code`, `city`, `asn`,
+`as_org`, `isp`, `hostname`, `usage_type` (six documented values or null; raw in
+`type_verdict`), `native`, `registered_country` — plus items (negative `points` are
+deductions) and ceiling. A missing ipx report makes the node `partial`
 (`completeness.checks.ipx_recorded`); `ipx.al` is in the Mihomo allowlist.
 Retry metadata, when present, must be internally consistent.
 Required and optional record fields are enforced by Python's ResultStore validator;

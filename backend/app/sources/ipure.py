@@ -41,6 +41,9 @@ IPURE_RESTRICTED_SCORE = -1
 
 IPURE_MAX_ATTEMPTS = 4
 
+# 上游明确答复「这个 IP 没收录」时的 error_type：记录照写原因，但不让节点降为「部分」。
+IPURE_NOT_INDEXED = "NotIndexed"
+
 # 单次尝试的硬上限。未收录 IP 的实时多源查询很慢，若让一次尝试吃满整个时间预算，
 # 卡住的连接会挤掉后面所有重试；限制单次时长才能让重试真正发生。
 IPURE_MAX_ATTEMPT_SECONDS = 10.0
@@ -254,6 +257,10 @@ def _response_error(
 ) -> tuple[str, str, bool]:
     code = payload.get("code") if isinstance(payload, dict) else None
     code_suffix = f"，{code}" if isinstance(code, str) and code else ""
+    if response.status_code == 401 and code == "invalid_api_key":
+        # 未收录的 IP 匿名接口不做实时检测（要 API Key），已收录报告才能匿名读。
+        # 这是上游对这个 IP 的答复，不是采集失败；直连同样拿不到，所以也不兜底。
+        return "IPure 未收录该 IP", IPURE_NOT_INDEXED, True
     if response.status_code == 403:
         if code == "verification_required":
             message = "IPure 当日免验证额度已用完，请在浏览器打开报告地址完成一次检测"

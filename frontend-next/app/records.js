@@ -25,17 +25,20 @@ const STATUSES = new Set(["success", "partial", "failed"]);
 // 渲染器只读这六项场景；总分走顶层 score（ipure_scores.total 与 score 同源，不再重复携带）。
 const SCENARIO_KEYS = ["ai", "social", "streaming", "gaming", "ecommerce", "email"];
 
-// 失败可能卡在四步流水线上，也只有这四步对读表格的人有意义。其余请求
-// （global_ping / port_scan / ping_check / related）是可选的探针，失败不代表流程卡住，
-// 所以不参与 error_step 的推断。
+// 失败可能卡在这几步上，也只有这几步对读表格的人有意义。其余请求
+// （who / global_ping / port_scan / ping_check）是可选的探针，失败不代表流程卡住，
+// 所以不参与 error_step 的推断。旧产物里的 page 仍认（新产物不再请求 Coffee 页面）。
 const STEP_LABELS = [
   ["page", "Coffee 页面"],
   ["trace", "出口 IP 确认"],
-  ["lookup", "Coffee 查询"],
-  ["ipure", "IPure 评分"],
-  ["ipqs", "1ms 评分"],
   ["ipx", "ipx 健康分"],
+  ["lookup", "Coffee 查询"],
+  ["ipqs", "1ms 评分"],
+  ["ipure", "IPure 评分"],
 ];
+
+// IPure 明确答复「未收录这个 IP」（匿名接口不做实时检测）时 requests.ipure 的 error_type。
+const IPURE_NOT_INDEXED = "NotIndexed";
 
 /* ------------------------------------------------------------- 值归一化 --- */
 
@@ -108,7 +111,7 @@ function pairFromLocation(value) {
   return { country: null, city: null };
 }
 
-// 国家代码 → 中文国名。who / 1ms 共识只给代码，IPure 给的是英文名；统一按代码本地化，
+// 国家代码 → 中文国名。ipx / who / 1ms 共识只给代码，IPure 给的是英文名；统一按代码本地化，
 // 整列同一种语言。运行环境没有 Intl.DisplayNames 时退回上游原文。
 const REGION_NAMES = (() => {
   try {
@@ -130,7 +133,7 @@ function regionName(code) {
 
 /**
  * 国家 / 城市的优先顺序：
- * - 新产物（带 network_source）：collector 已按「1ms who → 1ms 共识 → IPure」写好顶层字段，
+ * - 新产物（带 network_source）：collector 已按「ipx → 1ms who → 1ms 共识 → IPure」写好顶层字段，
  *   只认顶层，**不再**回落 Coffee 的归属数据——那正是这次改掉的来源；
  * - 旧产物：归属查询的原始字段 → coffee 页面拿到的同一份归属数据 → 从 location 串派生 → null。
  */
@@ -152,7 +155,7 @@ function countryCityOf(record) {
   return pairFromLocation(record?.location);
 }
 
-const SOURCES = new Set(["who", "ipqs", "ipure", "coffee"]);
+const SOURCES = new Set(["ipx", "who", "ipqs", "ipure", "coffee"]);
 const USAGE_TYPES = new Set(["residential", "mobile", "business", "hosting", "education", "government"]);
 
 const IPQS_GRADES = new Set(["A", "B", "C", "D", "F"]);
@@ -246,6 +249,16 @@ function scenarioScoresOf(source) {
   return scores;
 }
 
+/**
+ * IPure 没分时的说明：上游明说「未收录」就照说；否则只有「部分」才写明原因——
+ * 完整却缺分说明上游契约变了，那不该被一句解释掩盖过去。
+ */
+function scoreNoteOf(record, status, score) {
+  if (status === "failed" || score !== null) return null;
+  if (record?.requests?.ipure?.error_type === IPURE_NOT_INDEXED) return "IPure 未收录该 IP";
+  return status === "partial" ? "IPure 未返回纯净度总分" : null;
+}
+
 /* ----------------------------------------------------------------- 映射 --- */
 
 function toRow(record) {
@@ -274,7 +287,7 @@ function toRow(record) {
     rdns: rdns && rdns !== "-" ? rdns : null,
     isp: text(record?.isp),
     as_org: text(record?.as_org),
-    // 页面在 title 里写明「这一格来自 1ms who / 1ms IPQS / IPure」，排查数据时不必去翻产物。
+    // 页面在 title 里写明「这一格来自 ipx.al / 1ms who / 1ms IPQS / IPure」，排查数据时不必去翻产物。
     sources: sourcesOf(record),
     asn: asn !== null && asn > 0 ? asn : null,
     company_type: text(record?.company_type),
@@ -289,8 +302,7 @@ function toRow(record) {
     ...(failed ? ipqsOf(null) : ipqsOf(record)),
     ...(failed ? ipxOf(null) : ipxOf(record)),
     score,
-    // 只有「部分」+ 没分才写明原因：完整却缺分说明上游契约变了，那不该被一句解释掩盖过去。
-    score_note: status === "partial" && score === null ? "IPure 未返回纯净度总分" : null,
+    score_note: scoreNoteOf(record, status, score),
     ipure_scores: failed ? null : scenarioScoresOf(record?.ipure_scores),
     // 失败原因对所有状态都照抄：渲染器只在没有出口 IP 的行上展示它，而「部分」的行
     // 也可能恰好缺出口 IP（trace 没成功），那时它就是这行唯一的解释。

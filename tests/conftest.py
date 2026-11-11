@@ -51,11 +51,10 @@ def success_record(index: int, *, job_id: str = JOB_ID, name: str | None = None)
         "completeness": {
             "complete": True,
             "checks": {
-                "page_received": True,
                 "trace_received": True,
                 "exit_ip_valid": True,
                 "lookup_received": True,
-                "lookup_matches_trace": True,
+                "lookup_matches_exit_ip": True,
             },
         },
         "requests": {"ipure": {"direct_fallback": False, "via_mihomo": True}},

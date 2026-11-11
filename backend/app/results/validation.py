@@ -250,16 +250,7 @@ def validate_node(job_id: str, index: int, record: dict[str, Any]) -> None:
             or parsed_proxy.password
             or evidence.get("trust_env") is not False
             or not isinstance(checks, dict)
-            or not all(
-                checks.get(key) is True
-                for key in (
-                    "page_received",
-                    "trace_received",
-                    "exit_ip_valid",
-                    "lookup_received",
-                    "lookup_matches_trace",
-                )
-            )
+            or checks.get("exit_ip_valid") is not True
         ):
             raise ResultStoreError("成功节点记录的采集或代理证据无效")
         validate_ipure_scores(record)
@@ -326,14 +317,16 @@ def validate_ipure_evidence(evidence: dict[str, Any], requests: dict[str, Any]) 
 
 
 _NETWORK_SOURCE_KEYS = ("exit_ip", "geo", "isp", "kind", "native")
-_NETWORK_SOURCES = {"who", "ipqs", "ipure", "coffee", None}
+_NETWORK_SOURCES = {"ipx", "who", "ipqs", "ipure", "coffee", None}
 
 
 def validate_network_identity(record: dict[str, Any]) -> None:
     """Identity fields are optional (old artifacts lack them) but typed when present.
 
-    A group credited to 1ms who must be backed by a proxied who answer for this exit IP:
-    who has no host-side fallback, so anything else would describe the wrong machine.
+    A group credited to ipx.al must be backed by a report for this exit IP (proxied, or the
+    by-IP fallback). A group credited to 1ms who must be backed by a proxied who answer for
+    this exit IP: who has no host-side fallback, so anything else would describe the wrong
+    machine.
     """
 
     for field in ("country", "country_code", "region", "city"):
@@ -351,6 +344,15 @@ def validate_network_identity(record: dict[str, Any]) -> None:
         or any(source[key] not in _NETWORK_SOURCES for key in _NETWORK_SOURCE_KEYS)
     ):
         raise ResultStoreError("节点记录的 network_source 无效")
+    if "ipx" in source.values():
+        ipx = record["requests"].get("ipx")
+        data = ipx.get("data") if isinstance(ipx, dict) else None
+        if (
+            not isinstance(data, dict)
+            or ipx.get("ok") is not True
+            or not _same_ip(data.get("ip"), record.get("exit_ip"))
+        ):
+            raise ResultStoreError("节点记录的 ipx.al 来源缺少同 IP 的报告证据")
     if "who" in source.values():
         who = record["requests"].get("who")
         data = who.get("data") if isinstance(who, dict) else None
