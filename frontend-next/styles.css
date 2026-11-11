@@ -601,14 +601,15 @@ code { font-family: var(--font-mono); }
 
 .grid {
   width: 100%;
-  /* 1478px = colgroup 各列宽之和（render.js 的 COLUMNS）。低于这个数浏览器就开始挖列宽，
-     表头的列名 + 排序箭头会被挤到折行。所以窄屏宁可横向滚动，也不压缩列宽；
-     1440 视口可用 1392px，加了 ipx 列（64px）后已超出，窄于约 1530px 的视口会横向滚动。 */
-  min-width: 1478px;
+  /* 1340px = 长文本列收起时 colgroup 各列宽之和（render.js 的 COLUMNS 的 width）；展开时
+     是 fullWidth 之和 1550px。低于这个数浏览器就开始挖列宽，表头的列名 + 排序箭头会被挤到
+     折行，所以宁可横向滚动也不压缩。收起态在 1440 视口（可用 1392px）里放得下全部分数列。 */
+  min-width: 1340px;
   border-collapse: separate;
   border-spacing: 0;
   font-variant-numeric: tabular-nums;
 }
+.grid[data-long="expanded"] { min-width: 1550px; }
 
 .grid thead th {
   padding: 9px 10px;
@@ -893,19 +894,43 @@ select.filter-input {
 .grid thead th.col-ipqs,
 .grid thead th.col-ipx { text-transform: none; }
 .score .grade { margin-left: 2px; font-size: 9.5px; font-weight: 800; opacity: 0.75; }
-/* 分数左边的来源站点图标：点开该站对这个出口 IP 的报告。格子左右内边距收窄，
-   给「图标 + 药丸」腾位置（1ms 列最宽：14 + 3 + 带等级字母的药丸）。 */
+/* 分数格不折行、不省略：分数是这张表的重点，任何宽度下都完整显示。 */
 .grid .row > td:is(.cell-ipqs, .cell-ipx, .cell-ipure, .cell-coffee) {
   padding-left: 4px; padding-right: 4px; white-space: nowrap;
 }
-.src-link {
-  display: inline-flex; vertical-align: middle; margin-right: 3px;
-  border-radius: 4px; opacity: 0.85; transition: opacity 100ms ease, box-shadow 100ms ease;
+
+/* --- 长文本列：收起（默认）省略，展开换宽并折行 --- */
+/* 收起时出口 IP 列也只吃 colgroup 给的预算：IPv6 地址最长 39 个字符，不压住会把分数列挤出视口。
+   全文在 title 里（出口 IP 单击即全选，复制按钮照常可用）。 */
+@media (min-width: 901px) {
+  .grid[data-long="compact"] .cell-ip { max-width: 0; overflow: hidden; }
+  /* 复制按钮只留图标（按钮的 title / aria-label 仍写着「复制出口 IP」），IPv4 最长 15 字符能完整放下，
+     只有 IPv6 才会省略。 */
+  .grid[data-long="compact"] .cell-ip .copy-lbl { display: none; }
+  .grid[data-long="compact"] .cell-ip .copy-btn { margin-left: 3px; padding: 0 3px; }
+  .grid[data-long="compact"] .cell-ip .ip {
+    display: inline-block; max-width: calc(100% - 22px); vertical-align: middle;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
 }
-a.src-link:hover, a.src-link:focus-visible {
-  opacity: 1; box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink-3) 30%, transparent);
+.grid[data-long="expanded"] :is(.cell-ip, .cell-geo, .cell-isp, .ident) { white-space: normal; }
+.grid[data-long="expanded"] :is(.ip, .ip-sub, .geo, .geo-sub, .isp, .isp-sub, .node) {
+  white-space: normal; overflow: visible; overflow-wrap: anywhere;
 }
-.src-icon { display: block; width: 14px; height: 14px; border-radius: 3px; }
+
+/* --- 数据来源：顶部逐个引用各站官网 --- */
+.source-credits {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px;
+  margin: 8px 0 0;
+  color: var(--ink-3); font-size: 12px;
+}
+.credits-label { font-weight: 700; }
+.credit {
+  display: inline-flex; align-items: center; gap: 5px;
+  color: var(--ink-2); text-decoration: none; font-weight: 600;
+}
+a.credit:hover, a.credit:focus-visible { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+.credit-icon { display: block; width: 14px; height: 14px; border-radius: 3px; }
   /* 四档配色的规则与 .chip-* 合并到上面的「通用药丸」段：两组的 color / background /
      border-color 逐字相同，改一处等于同时改两处。 */
 
@@ -1025,7 +1050,9 @@ a.src-link:hover, a.src-link:focus-visible {
   .topbar-controls > .seg button { flex: 1 1 0; justify-content: center; padding: 0 6px; }
 
   .table-wrap { background: none; border: 0; box-shadow: none; overflow: visible; }
-  .grid { display: block; min-width: 0; }
+  .grid, .grid[data-long="expanded"] { display: block; min-width: 0; }
+  /* 卡片态本来就折行显示全文，收起 / 展开没有意义。 */
+  #longToggle { display: none; }
   .grid colgroup { display: none; }
   /* 卡片态的表头：列名行变成一条可横向滑动的排序胶囊，点哪个就按哪个排；
      筛选行变成一组带标签的小输入格，由顶部「列筛选」按钮展开 / 收起。 */
@@ -1151,8 +1178,8 @@ a.src-link:hover, a.src-link:focus-visible {
   }
   .grid .row > td.ident .ident-sub { white-space: normal; flex-wrap: wrap; }
 
-  /* order 把四个总分提到名字后面（1ms 与 ipx 同为 order 3，按 DOM 次序 1ms 在前）：DOM 顺序里它们排在最后（导出与快照都按那个顺序），
-     这里只改视觉次序——榜单第一眼看的就是分数，不该压在卡片底部。 */
+  /* order 把四个总分提到名字后面，四个同为 order 3，按 DOM 次序（ipx → Coffee → 1ms → IPure，
+     与宽表列序一致）：DOM 里它们排在归属信息之后，这里只改视觉次序——榜单第一眼看的就是分数。 */
   .grid .row > td.cell-ipqs,
   .grid .row > td.cell-ipx,
   .grid .row > td.cell-coffee,
@@ -1163,10 +1190,7 @@ a.src-link:hover, a.src-link:focus-visible {
     gap: 3px;
     padding: 0;
   }
-  .grid .row > td.cell-ipqs,
-  .grid .row > td.cell-ipx { order: 3; }
-  .grid .row > td.cell-ipure { order: 4; }
-  .grid .row > td.cell-coffee { order: 4; }
+  .grid .row > td:is(.cell-ipx, .cell-coffee, .cell-ipqs, .cell-ipure) { order: 3; }
   /* 两个分数只差一个数字，卡片里必须标出谁是谁。生成内容只是视觉冗余：
      两个格子的 title 与 data-label 都写着全称。 */
   .grid .row > td.cell-ipqs::before { content: "1ms"; }
@@ -1184,11 +1208,6 @@ a.src-link:hover, a.src-link:focus-visible {
     letter-spacing: 0;
     text-transform: none;
   }
-  /* 有来源图标时图标就是标签（竖排在分数上方），文字标签只留给没有出口 IP 的卡片。 */
-  .grid .row > td:is(.cell-ipqs, .cell-ipx, .cell-coffee, .cell-ipure):has(.src-link)::before {
-    content: none;
-  }
-  .grid .row > td:is(.cell-ipqs, .cell-ipx, .cell-coffee, .cell-ipure) .src-link { margin-right: 0; }
   .grid .row > td.cell-ipqs .score,
   .grid .row > td.cell-ipx .score,
   .grid .row > td.cell-coffee .score,

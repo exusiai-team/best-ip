@@ -23,7 +23,10 @@ import {
   SCAN_POLL_FIRST_MS, SCAN_POLL_MAX_MS, SCAN_POLL_FINISH_MS, SCAN_PROGRESS_POLL_MS,
 } from "./scan.js";
 import { toRows, toSnapshotMeta } from "./records.js";
-import { createRow, createColGroup, createHead, syncHeadSort, applyScoreStyles, COLUMNS, COLUMN_BY_KEY, STATUS_LABELS } from "./render.js";
+import {
+  createRow, createColGroup, createHead, syncHeadSort, applyScoreStyles, setLongTextExpanded, sourceCreditsHtml,
+  COLUMNS, COLUMN_BY_KEY, STATUS_LABELS,
+} from "./render.js";
 import {
   DEFAULT_SORTS, compileFilters, comparator, decodeHash, encodeHash, filterIsValid, nextSorts,
 } from "./table.js";
@@ -56,6 +59,8 @@ const elements = {
   filterToggle: document.getElementById("filterToggle"),
   filterCount: document.getElementById("filterCount"),
   filterSuggest: document.getElementById("filterSuggest"),
+  longToggle: document.getElementById("longToggle"),
+  sourceCredits: document.getElementById("sourceCredits"),
 };
 
 const missingElementIds = [];
@@ -576,15 +581,6 @@ function exportGridHtml() {
     span.className = "th-sort";
     span.append(...button.childNodes);
     button.replaceWith(span);
-  });
-  // 来源图标的报告链接降成普通 span（图标是内嵌 data URI，照样显示）：快照约定不含任何外链。
-  grid.querySelectorAll("a.src-link").forEach((link) => {
-    const span = document.createElement("span");
-    for (const { name, value } of Array.from(link.attributes)) {
-      if (!["href", "target", "rel"].includes(name)) span.setAttribute(name, value);
-    }
-    span.append(...link.childNodes);
-    link.replaceWith(span);
   });
   grid.querySelectorAll(".quick").forEach((node) => {
     node.classList.remove("quick");
@@ -1252,6 +1248,15 @@ function boot() {
   // 表头不重建，避免每次输入都重排整张表。
   elements.gridColumns.replaceChildren(createColGroup(document));
   elements.gridHead.replaceChildren(createHead(document));
+  if (elements.sourceCredits) elements.sourceCredits.innerHTML = sourceCreditsHtml();
+  // 长文本列默认收起，把版面让给分数列；按钮在两态之间切换。
+  setLongTextExpanded(elements.grid, false);
+  elements.longToggle?.addEventListener("click", () => {
+    const expanded = elements.grid.dataset.long !== "expanded";
+    setLongTextExpanded(elements.grid, expanded);
+    elements.longToggle.setAttribute("aria-pressed", String(expanded));
+    elements.longToggle.textContent = expanded ? "收起长文本" : "展开长文本";
+  });
   elements.query.value = state.query;
   // 宽屏默认展开筛选行；窄屏（卡片态）默认收起，有生效的筛选时也展开，免得筛了却看不见在筛什么。
   setFiltersOpen(Boolean(globalThis.matchMedia?.("(min-width: 901px)").matches) || activeFilterKeys().length > 0);

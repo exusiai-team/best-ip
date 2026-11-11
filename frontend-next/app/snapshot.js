@@ -28,6 +28,7 @@
 
 import { buildMhtml, utf8ToBytes } from "../export/mhtml.js";
 import { DEFAULT_TIMEOUT_MS, fetchWithTimeout, isTimeoutError } from "./net.js";
+import { sourceCreditsHtml } from "./render.js";
 
 const STYLESHEET_URL = new URL("../styles.css", import.meta.url);
 const COPY_SCRIPT_URL = new URL("./copy.js", import.meta.url);
@@ -181,6 +182,7 @@ export function buildSnapshotDocument(options) {
 ${BRAND_BLOCK}
         <p class="run-stats">${summary.statsHtml}</p>
       </div>
+      <p class="source-credits">${sourceCreditsHtml({ withLinks: false })}</p>
       <div class="topbar-controls">
         <p class="snapshot-state">${summary.stateHtml}</p>
         ${scriptNote}

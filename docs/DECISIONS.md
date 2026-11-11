@@ -22,7 +22,8 @@
 - **IPure 以官方 `/docs/api` 为准**：`GET /api/lookup?ip=`，不带凭据，六个场景（ai / social / streaming / gaming / ecommerce / email）。
 - **评分取值域 `0..100 ∪ {-1} ∪ {null}`**：`-1` 表示上游标了地区受限，由后端写入，前端不推导，显示成中性灰的 `-1`；`score` 必须等于 `ipure_scores.total`。
 - **地区、服务商、服务器名以 1ms who 为准，不再回落 Coffee**：who → 1ms IPQS 共识 → IPure；`network_source` 记录每组来源。who 的 `/api/me` 经节点代理问「网站看到的这条连接」，Cloudflare 给国家/地区/城市/ASN/AS 组织，另给 PTR（写进 `rdns`）。它只认调用方，所以没有宿主直连兜底（直连会描述扫描机自己），回显 IP 与 trace 出口不一致（多出口节点）时整组让给按 IP 查询的来源。who 只给国家代码，国名由前端按代码本地化成中文；IPure 的英文国名在代码一致时保留在 `country`。`exit_ip` 仍由 Coffee trace 发现，who 回显一致时记为 who 确认。
-- **表格默认按 1ms 综合分、再按 IPure 总分降序**；Coffee 只剩单一来源的信任分，挪到最后一列。出口 IP 下一行显示服务器名（PTR），国家下一行显示城市。
+- **表格默认按 1ms 综合分、再按 IPure 总分降序**；分数列顺序按用户指定为 ipx → Coffee → 1ms → IPure（+ 六项场景）。出口 IP 下一行显示服务器名（PTR），国家下一行显示城市。
+- **数据来源在页面顶部统一引用官网，不在每个分数格放图标**：逐格图标挤占分数列、读起来像装饰，引用一次就够。节点 / IP / 地区 / 服务商默认收起（省略 + title 全文），表格最小宽从 1478px 降到 1340px，1440 视口里分数列全部可见；需要读全文时一键展开（1550px）。
 - **接入与原生性改由 1ms IPQS 优先**（1ms → IPure → Coffee），并新增一列 1ms 综合评分。1ms 的 `/api/check` 对十余个源投票，比单一来源的判断稳；只读 NDJSON 末尾的 `done` 事件。网页另有两个只在浏览器里跑的源（ipinfo、ipwho），核对过页面代码：它们只给地理、ASN、主机名，不给类型、匿名标记和风险值，因此 `done.score` 就是网页显示的分数。没有在后端复刻 1ms 的聚合算法：那等于长期追一个别人的私有实现，分数还会悄悄漂移。记录只新增 `ipqs_score` / `ipqs_grade` / `ipqs_report_url`，类型与原生性并入已有的 `usage_type` / `is_native`，不另立平行字段。
 - **新增 ipx.al 健康分，用 `/json` 而不是 `/api/report/{ip}`**：实测各源单次耗时 Coffee trace ≈1.2s、lookup ≈0.6s、who ≈1.4s、1ms IPQS ≈5s、ipx ≈4–8s（2026-11-11，宿主直连）。ipx 是最慢的一个，若排在 trace 之后会把每个节点拉长；`/json` 只认调用方，经节点代理问就是节点出口，于是和 trace、who 一起在第 0 秒发出，耗时被 lookup / IPQS 覆盖。代价是多出口节点可能回报另一个 IP，所以回显不一致时改由宿主按 IP 查（文档相同，只是视角不同，记为直连兜底）。只取分数、等级与报告页地址；类型与原生性仍由 1ms 共识决定，不另立第二套归属链。
 - **扫描用的 Mihomo 是域名白名单**（未列出的一律 `MATCH,REJECT`）：新增任何经节点访问的数据源都必须把主机加进 `mihomo.py` 的 `rules`。主机常量从 `sources/http.py` import，不另抄一份。漏掉时请求会全部「成功」地走宿主直连兜底，表面看不出来（1ms 首轮真实验收就是 23/23 直连）；所以兜底成功时也会记下 `requests.ipqs.proxy_error`，`verify_real_scan.py` 会打印经代理与走直连的节点数。

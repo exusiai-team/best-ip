@@ -1,32 +1,47 @@
 /* ============================================================================
-   分数来源的站点图标与「按 IP 查看报告」地址
+   数据来源的官网：页面顶部「数据来源」一行逐个引用（render.js 的 renderSourceCredits）
    ----------------------------------------------------------------------------
    图标取自各站 favicon，内嵌成 data URI：生产 CSP 是 img-src 'self' data:，外链图片会被拦；
-   导出的快照也因此不依赖外网。地址只由出口 IP 拼出，与记录里是否拿到分数无关——
-   上游没给分（如 IPure 要求 API key）时，点图标仍能去网页上手动查。
+   导出的快照也因此不依赖外网。
    ========================================================================== */
 
-const ip = (value) => encodeURIComponent(value);
-
-export const SOURCE_SITES = Object.freeze({
+const SOURCE_SITES = Object.freeze({
   ipqs: {
     name: "1ms IPQS",
     icon: "data:image/png;base64,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",
-    url: (value) => `https://ipqs.1ms.dog/zh-cn/?ip=${ip(value)}`,
+    home: "https://ipqs.1ms.dog/zh-cn/",
+    use: "综合评分、接入类型、原生性",
   },
   ipx: {
     name: "ipx.al",
     icon: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJiIiB4MT0iMCIgeTE9IjAiIHgyPSIwIiB5Mj0iMSI+PHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjM2EzYTNjIi8+PHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSIjMTExMTEzIi8+PC9saW5lYXJHcmFkaWVudD48bGluZWFyR3JhZGllbnQgaWQ9InIiIHgxPSIwIiB5MT0iMCIgeDI9IjEiIHkyPSIxIj48c3RvcCBvZmZzZXQ9IjAiIHN0b3AtY29sb3I9IiM1ZWUzOGEiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiMxZmI4NWEiLz48L2xpbmVhckdyYWRpZW50PjwvZGVmcz48cmVjdCB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHJ4PSIxNC41IiBmaWxsPSJ1cmwoI2IpIi8+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMTkiIGZpbGw9Im5vbmUiIHN0cm9rZT0icmdiYSgyNTUsMjU1LDI1NSwuMTQpIiBzdHJva2Utd2lkdGg9IjYiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjMyIiByPSIxOSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ1cmwoI3IpIiBzdHJva2Utd2lkdGg9IjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWRhc2hhcnJheT0iODkuNSAxMTkuNCIgdHJhbnNmb3JtPSJyb3RhdGUoLTkwIDMyIDMyKSIvPjxjaXJjbGUgY3g9IjMyIiBjeT0iMzIiIHI9IjYiIGZpbGw9IiNmZmYiLz48L3N2Zz4=",
-    url: (value) => `https://ipx.al/${ip(value)}`,
+    home: "https://ipx.al/",
+    use: "健康分",
   },
   ipure: {
     name: "IPure",
     icon: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADimHc4AAAACXBIWXMAAAsTAAALEwEAmpwYAAAFh0lEQVR4nO1dW2xVRRQ9P3Sms3s7Ux/4IRWlWr6IttyCEqi2fmgiHi1Wm6aNmJKmj6SRSAQ1GmkTDaYoGo21oCIm6oeooLYFUsQYjNEYrAVqIhAlpPeWvjn8UEvYZm6pqVhLX7f73DMzyfrfs9bsNY+TnOU40x+MgcxjIOsYqC+4kB1MqH4O6i8OCgOKodgchTyu58xA1jKQ92gunLkaQsilHNR2LuSgDwhBP4AJNcBBNQohs+NJfDYHtZ96stz3kC1CyDtmkfoFyVzINzioi/STU4mCYSbUNsdx+IyoTwqFFnMh230wIUxMyLakUOi2aZGfnJyaw4Tqpp+ESmgwofo4T1sxRfJDy7mQ56mL50GBkOeTk1OXTdp2mFC95EVDsMCE6pmMHXEG6hfqYnlQIWS7PtT8P/sjpx36QiG4YEK9NtE53x41Ie4iXBz3nmAvWWoOO0E2jfe8QN6e3BxcEkJmjV39231QFJoF2TDKP7MPa2rOBdCvqvrU7zCQ+fSrQZmJFJWrBagjLwTMBAO52eEg91IXwg0FA/W5vnx1UBfCTYWQx5zYax11IWDu+5A+gg5RF8LNxQXHB0WgybACgBUAqUmwHQD0RFgLAjNh9wCwAiA1CbYDgJ4Ia0FgJuweAAYKAOkLY+A+WIFGCpD53hbM3LWVfPJGCnBD4YMY7jwcw/xHVpMTYJQAsOAmzGr/+h8Bso41Y8rCW8hJMEYAbT2j5I8i03Arciis50rMN9iKHArruRJZBluRQ2U91orU3AgwkfWErRXFV4CrWU/YWlF8BZiM9YQNPxU5frCesMFW5PjBesIGW5HjF+sJG2pF9jkarABITYLtAKAnwloQmAm7B4AVAKlJSPgOEGnX461Vj2Ju8yvonvwAiyK7sDSyA8uib2NF9HWsidbjU9GXcFN0M74QfQ7rup7GLV1P4qtd1fhmpBIbz1TgztPl+NEf63D3yTL88vcncN9vj+M3x0vx8NES/KmtGNuOFGHHz4/hqR8L8cwPa/Ds9wU48N1D6B1y0TvgotfkorfHRW+3i94nLnofuui976LX6KL3loveNhe9ehe9l130al30nnfRe8ZFb4OL59YX4LmaQhysLsLBymIcKC/F/rK12L+2DPtKy7GvuBJ7i6rx9MNVeCC/BKsWr8DU0LX+ECC0aBEuO9iA90X24urIp7gm8nFgBegprMGegvXY7W7Ab+9ehzdfcyOtAHrlZx98F/M6m40ToPuBjXhoZfmMO2FGAqRXleLKzlZjBTh7/7NYkZFLJ8CSlh3GC9ByZzmdAOET+40X4NS9m6wAHqEFncjfaC3IM9WC0itLjLegCspNWB9Dl7aafQwNUR5DRy9iy1vtRYxTCRDrBHUdZlQU4qom/RSxM7Ad8GdBFe7LK8FKPz1FWCgrAE/ghWA7AKwASE2C7QCgJ8JaEJgJuweAFQCpSbAdAPREWAsCM2H3ALACoOkdYH9bCWQCXLA/bgW61a9jwuyvi4H418Uc5B5qH+SGggn1mf59fS11IdxUCPWiFiCPvBAwFClqVSzC5HIeLn1BYA70X+tjESY2xEeRh/iMhriRrwpuVozVv8PcdBK0DwpDMyC/+k+S3jxIW6KToOmLU0HH8Dyhbh83T1LHcPugQAwyGKj6q8XZHqEukgcVQv46YZytHjp0WIfLkBcLwXv3YampGc5kho7ftpHmarYjzXMmRf4YEXK0atQrhyc4YjFhPO2uKZE/1o44yDbqSfAEhd5PJ207EwyuY7jtEVVNhfxhJtRWzZ0zW0OfXXUStL7FUa8s7l9c0pcsfady4jV0EjQH9Y7Ow/XBhNEPGImDlA3jZsXHcSTpPFwdyapTQfXXHSZUb8C/MQ/F5ijkUf0xRc/98pPyyKvmNMbfATIBk4i8NooAAAAASUVORK5CYII=",
-    url: (value) => `https://ipure.dev/ip/${ip(value)}`,
+    home: "https://ipure.dev/",
+    use: "纯净度总分与六项场景分",
   },
   coffee: {
     name: "Coffee",
     icon: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABmJLR0QA/wD/AP+gvaeTAAADXElEQVRYhe2WT4gcVRDGf9XTM7Lx4mHanXndupsoBF0CYiRsRBTxD54kGkLw5ElUkMVzDoIHvSoECeJJEeLB9RQ0CiJBRFGMf3AiC7PraHZe7+zArh6M7k5Pl4ftXjrD9PTKjPGS79JVXdX1fTOv6r0H1/E/Q7KOMWafqh52HKc2bmFVbVcqlYutVuvvPQkwxtwHnAWCcckzWFbVk2EYfjtSwOzs7E3b29s/A2P/8iFoAXPW2ivDgi7A1tbWgyJSAxCRC6r60QSIjwHzwKyIHAU+zRXgOM5+VQVAVd+01p4dl71er2+KyDxAHMcH8gQ4yVOGBSeI3PpOXmDCuHtmZqZ+rQXcmRoi8myv11v1ff/9QSHuqApzc3OVjY2N50XkgKq+M2ycjDH3Ak+JSKPdbr8F9BPS7YFUR1WP93q9I57nHel2u2tQ8A9sbm6+KiKvAwsicsH3/av2CGPMQeAz4AVVPeP7/qk0pqrNTOrHwFpi3+K67uldVaMEiMj9GfdGVb1nID4PVDKkDwyro6ofRFF0F9BJvnvC87xaoYA4jj/JuH/0er2vsvEoij4H/sq8Op9Xa319vQO8nbgl13WPQkEPhGH4ku/7zTiObxORd9N1S9HpdFaCIJhX1ZOq+pO19r1R9YCl1BCReqEAIAa6qvpNGIZLwxJWV1d/NMaUAA/Qgnq7+4GIKBQsQRAEh1T1nOM4XxtjHhmWY4w5BnwJnJ+ent5fIOBgaqhqWCggjuNl4CKwD/jQ9/1XjDFVAM/zar7vvwYsAjcAX1Sr1XZeraTpnk7cftpPIwVYa69UKpWH2Bk1V1VPAR1jTLdcLltVfTGpca7f7z/WaDQGZx8AETleLpd/AG5OXi3uaR8AaLVav1trHwYWgF+Tb6rsrGcTeMZa+3in0/lzgPT2jPtohvy3KIoW0kBRE6aIrbWngTdqtdodpVKppqpta+0SOY2nqhWRq86gPrAYRdFCMpL/SsCukLW1tQbQ2EPupYx9Joqil7PEKa7Jaaiq3w8jzwoomt+xNeQFXIA4jn/JrNdzxphbx2ZUfTK1HcdZycvLXkovAUMvDeNARFZU9VDepdSBnVEDTgCXJ8y/rKon8shh4K4WBMFUHMeH04NiTFyempr6rtlsbk2g1nX8d/gHDxNf+NX4+tgAAAAASUVORK5CYII=",
-    url: (value) => `https://ip.net.coffee/ip/${ip(value)}`,
+    home: "https://ip.net.coffee/ip/",
+    use: "出口 IP 探测、信任分",
   },
 });
+
+/** 顶部引用的顺序：1ms who 与 1ms IPQS 同站，共用一个图标。 */
+export const SOURCE_CREDITS = Object.freeze([
+  {
+    name: "1ms who",
+    icon: SOURCE_SITES.ipqs.icon,
+    home: "https://who.1ms.dog/",
+    use: "国家和地区、服务商、服务器名",
+  },
+  SOURCE_SITES.ipqs,
+  SOURCE_SITES.ipx,
+  SOURCE_SITES.ipure,
+  SOURCE_SITES.coffee,
+]);
