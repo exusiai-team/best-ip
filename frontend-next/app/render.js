@@ -110,7 +110,7 @@ export const COLUMNS = [
     filterValue: (r) => (r.exit_ip ? joined(r.country, r.country_raw, r.country_code, r.region, r.city) : ""),
   },
   {
-    key: "isp", label: "服务商 / ISP", width: "124px", fullWidth: "200px", sort: "text", filter: "text",
+    key: "isp", label: "服务商 / ISP", width: "96px", fullWidth: "200px", sort: "text", filter: "text",
     placeholder: "名称/AS 号", suggest: (r) => r.isp,
     sortValue: (r) => (r.exit_ip ? r.isp : null) || null,
     filterValue: (r) => joined(r.isp, r.as_org, formatAsn(r.asn)),
