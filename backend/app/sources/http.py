@@ -10,7 +10,6 @@ from .ipure_config import load_ipure_headers
 
 COFFEE_HOST = "ip.net.coffee"
 COFFEE_ORIGIN = f"https://{COFFEE_HOST}"
-COFFEE_PAGE_URL = f"{COFFEE_ORIGIN}/ip/"
 COFFEE_TRACE_URL = f"{COFFEE_ORIGIN}/cdn-cgi/trace"
 IPURE_HOST = "ipure.dev"
 IPURE_ORIGIN = f"https://{IPURE_HOST}"
@@ -141,9 +140,9 @@ def _validate_coffee_url(url: str) -> None:
 
     path = parsed.path or "/"
     query = parse_qs(parsed.query, keep_blank_values=True)
-    if path in {"/ip/", "/cdn-cgi/trace"}:
+    if path == "/cdn-cgi/trace":
         if query:
-            raise ValueError(f"页面/trace 不允许 query：{url}")
+            raise ValueError(f"trace 不允许 query：{url}")
         return
     if path.startswith("/api/ip/"):
         prefix = next(
@@ -151,7 +150,6 @@ def _validate_coffee_url(url: str) -> None:
                 item
                 for item in (
                     "/api/ip/lookup/",
-                    "/api/ip/related/",
                     "/api/ip/portscan/",
                     "/api/ip/pingcheck/",
                 )

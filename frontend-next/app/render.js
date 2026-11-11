@@ -23,7 +23,7 @@ import { comparableScore, ipureScoreInlineStyle } from "./score-color.js";
 import { SOURCE_CREDITS } from "./source-icons.js";
 
 const STATUS_LABELS = { success: "完整", partial: "部分", failed: "失败" };
-const SOURCE_LABELS = { who: "1ms who", ipqs: "1ms IPQS", ipure: "IPure", coffee: "Coffee" };
+const SOURCE_LABELS = { ipx: "ipx.al", who: "1ms who", ipqs: "1ms IPQS", ipure: "IPure", coffee: "Coffee" };
 
 // 1ms 评分的扣分项（done.parts[].k 去掉 p_ 前缀），只用来写 tooltip。
 const IPQS_DEDUCTIONS = {
@@ -32,7 +32,7 @@ const IPQS_DEDUCTIONS = {
 };
 
 /* ------------------------------------------------------------- 取值函数 --- */
-// usage_type → 接入列的词（1ms IPQS 多源共识优先，回落 IPure、Coffee，见 network_source）。住宅、移动是「真人上网」的出口，风控最友好，着绿色。
+// usage_type → 接入列的词（ipx 多源投票优先，回落 1ms IPQS 共识、IPure、Coffee，见 network_source）。住宅、移动是「真人上网」的出口，风控最友好，着绿色。
 const USAGE_LABELS = {
   residential: "住宅", mobile: "移动", business: "商业", hosting: "机房", education: "教育", government: "政府",
 };
@@ -375,7 +375,7 @@ function ipCell(document, result) {
   const td = cell(document, "ip", "cell-ip");
   const code = el(document, "code", "ip");
   code.textContent = result.exit_ip;
-  const confirmedBy = { who: "1ms who", ipure: "IPure" }[result.sources?.ip];
+  const confirmedBy = { ipx: "ipx.al", who: "1ms who", ipure: "IPure" }[result.sources?.ip];
   code.title = `出口 IP${confirmedBy ? `（${confirmedBy} 已确认）` : sourceNote(result.sources?.ip)}`;
 
   const copy = el(document, "button", "copy-btn");

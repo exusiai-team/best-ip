@@ -5,9 +5,11 @@ egress in one request — no exit IP needed first, so it starts together with th
 instead of queueing behind it. `GET /api/report/{ip}` is the same document keyed on an
 address; it is the host-side fallback, used only after the trace has named the exit IP.
 
-The proxied answer is accepted only when its `ip` equals the trace exit IP: multi-exit
-nodes may use another address per connection, and then the report describes a different
-IP. Only `health.score` / `health.grade` reach the record; the rest stays as evidence.
+The proxied answer is accepted only when its `ip` equals the exit IP: multi-exit nodes
+may use another address per connection, and then the report describes a different IP.
+Besides the score, the report is the first source of the node's identity — location,
+ASN / organisation, reverse DNS, usage type and native verdict (see
+`collector._network_identity`).
 """
 
 from __future__ import annotations
@@ -28,10 +30,15 @@ from .http import (
     _validate_ipx_url,
     stream_bounded_get,
 )
+from .ipure import IPURE_USAGE_TYPES
 from .values import _clean_text
 
 # Grade ladder from https://ipx.al/about: 85 极佳 / 70 良好 / 50 一般 / 30 较差 / else 高风险.
 IPX_GRADES = ("极佳", "良好", "一般", "较差", "高风险")
+
+# ipx 的 type.verdict → 六档接入。`isp` 是它的「家宽」（类型上限 100，见 /about；
+# 2026-11-11 正式订阅里 4 个 isp 节点 1ms 共识全判 residential）。其余不认识的词留给下一个来源。
+_USAGE_ALIASES = {"isp": "residential"}
 
 _DIRECT_TIMEOUT_SECONDS = 15.0
 
@@ -152,7 +159,12 @@ def parse_report(payload: Any) -> dict[str, Any] | None:
     native = payload.get("native") if isinstance(payload.get("native"), dict) else {}
     verdict = native.get("verdict")
     kind = payload.get("type") if isinstance(payload.get("type"), dict) else {}
+    type_verdict = _clean_text(kind.get("verdict")) or None
+    usage = _USAGE_ALIASES.get(type_verdict, type_verdict)
     coverage = health.get("coverage") if isinstance(health.get("coverage"), dict) else {}
+    location = payload.get("location") if isinstance(payload.get("location"), dict) else {}
+    country_code = _clean_text(location.get("country")).upper()
+    org = _clean_text(payload.get("org")) or None
     items = [
         {
             "code": _clean_text(item.get("code")) or None,
@@ -170,9 +182,18 @@ def parse_report(payload: Any) -> dict[str, Any] | None:
         "grade_raw": grade,
         "ceiling": health.get("ceiling") if _int_between(health.get("ceiling"), 0, 100) else None,
         "ip_type": _clean_text(health.get("ipType")) or None,
-        "type_verdict": _clean_text(kind.get("verdict")) or None,
+        "type_verdict": type_verdict,
+        "usage_type": usage if usage in IPURE_USAGE_TYPES else None,
         "native": {"native": True, "broadcast": False}.get(verdict),
-        "registered_country": _clean_text(native.get("regCountry")) or None,
+        "registered_country": _clean_text(native.get("regCountry")).upper() or None,
+        "country_code": country_code if len(country_code) == 2 and country_code.isalpha() else None,
+        "city": _clean_text(location.get("city")) or None,
+        "asn": payload.get("asn") if _int_between(payload.get("asn"), 1, 4_294_967_295) else None,
+        # `org` 是 RIR 的「AS 句柄 - 组织名」写法（如 "AMAZON-02 - Amazon.com, Inc."）：
+        # 整串当 AS 组织，句柄后的部分当服务商。
+        "as_org": org,
+        "isp": org.split(" - ", 1)[1].strip() if org and " - " in org else org,
+        "hostname": _clean_text(payload.get("hostname")) or None,
         "items": items,
         "model": _clean_text(health.get("model")) or None,
         "coverage_low": coverage.get("low") if isinstance(coverage.get("low"), bool) else None,

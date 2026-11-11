@@ -43,6 +43,7 @@ from backend.app.sources.http import (
 )
 from backend.app.sources.ipqs import ipqs_fields, ipqs_url
 from backend.app.sources.ipure import (
+    IPURE_NOT_INDEXED,
     IPURE_RESTRICTED_LEVEL,
     IPURE_RESTRICTED_SCORE,
     IPURE_SCENARIOS,
@@ -136,6 +137,32 @@ def _node_ipure_score_valid(record: dict[str, Any], ipure: dict[str, Any]) -> bo
         if scores.get(scenario_id) != expected:
             return False
     return True
+
+
+def _node_exit_ip_valid(
+    record: dict[str, Any], requests: dict[str, Any], evidence: dict[str, Any]
+) -> bool:
+    """The exit IP comes from the proxied Coffee trace, or — only when trace named none —
+    from the proxied ipx / who echo that `exit_ip_source` credits."""
+
+    exit_ip = record["exit_ip"]
+    source = evidence.get("exit_ip_source")
+    trace = requests.get("trace")
+    if not isinstance(trace, dict) or trace.get("via_mihomo") is not True:
+        return False
+    trace_ip = _trace_ip(trace.get("data")) if trace.get("ok") is True else ""
+    if trace_ip:
+        return source == "trace" and trace_ip == exit_ip
+    echo = {"ipx": IPX_SELF_URL, "who": WHO_ME_URL}.get(source)
+    answer = requests.get(source) if echo else None
+    if not isinstance(answer, dict):
+        return False
+    data = answer.get("data") if isinstance(answer.get("data"), dict) else {}
+    return (
+        answer.get("via_mihomo") is True
+        and answer.get("url") == echo
+        and _is_same_ip(data.get("ip"), exit_ip)
+    )
 
 
 def _node_ipx_valid(record: dict[str, Any], ipx: Any, evidence: dict[str, Any]) -> bool:
@@ -505,29 +532,22 @@ async def verify() -> None:
                 ):
                     raise RuntimeError(f"节点 {index} 代理证据无效")
                 requests = record.get("requests")
-                page = requests.get("page") if isinstance(requests, dict) else None
                 trace = requests.get("trace") if isinstance(requests, dict) else None
                 lookup = requests.get("lookup") if isinstance(requests, dict) else None
                 ipure = requests.get("ipure") if isinstance(requests, dict) else None
+                if not _node_exit_ip_valid(record, requests, evidence):
+                    raise RuntimeError(f"节点 {index} 出口 IP 来源证据无效")
                 lookup_data = lookup.get("data") if isinstance(lookup, dict) else None
-                if (
-                    not isinstance(page, dict)
-                    or page.get("ok") is not True
-                    or page.get("via_mihomo") is not True
-                    or page.get("proxy_url") != evidence.get("proxy_url")
-                    or not isinstance(trace, dict)
-                    or trace.get("ok") is not True
-                    or trace.get("via_mihomo") is not True
-                    or trace.get("proxy_url") != evidence.get("proxy_url")
-                    or _trace_ip(trace.get("data")) != exit_ip
-                    or not isinstance(lookup, dict)
-                    or lookup.get("ok") is not True
-                    or lookup.get("via_mihomo") is not True
-                    or lookup.get("proxy_url") != evidence.get("proxy_url")
-                    or not isinstance(lookup_data, dict)
-                    or not _is_same_ip(lookup_data.get("ip"), exit_ip)
+                if not isinstance(lookup, dict) or (
+                    lookup.get("ok") is True
+                    and (
+                        lookup.get("via_mihomo") is not True
+                        or lookup.get("proxy_url") != evidence.get("proxy_url")
+                        or not isinstance(lookup_data, dict)
+                        or not _is_same_ip(lookup_data.get("ip"), exit_ip)
+                    )
                 ):
-                    raise RuntimeError(f"节点 {index} trace/lookup 证据无效")
+                    raise RuntimeError(f"节点 {index} Coffee lookup 证据无效")
                 ipure_direct = ipure.get("direct_fallback") if isinstance(ipure, dict) else None
                 if (
                     not isinstance(ipure, dict)
@@ -540,7 +560,9 @@ async def verify() -> None:
                     or ipure.get("url") != _ipure_url(exit_ip)
                 ):
                     raise RuntimeError(f"节点 {index} IPure 代理证据无效")
-                if not _node_ipure_score_valid(record, ipure):
+                if ipure.get("error_type") != IPURE_NOT_INDEXED and not _node_ipure_score_valid(
+                    record, ipure
+                ):
                     reason = " ".join(str(ipure.get("error") or "").split())[:200]
                     raise RuntimeError(
                         f"节点 {index} IPure 评分证据无效：{reason or '响应缺少纯净度总分'}"
@@ -563,11 +585,9 @@ async def verify() -> None:
                 checks = completeness.get("checks") if isinstance(completeness, dict) else None
                 if (
                     not isinstance(checks, dict)
-                    or checks.get("page_received") is not True
-                    or checks.get("trace_received") is not True
+                    or checks.get("trace_received") is not (trace.get("ok") is True)
                     or checks.get("exit_ip_valid") is not True
-                    or checks.get("lookup_received") is not True
-                    or checks.get("lookup_matches_trace") is not True
+                    or checks.get("lookup_received") is not (lookup.get("ok") is True)
                     or checks.get("ipure_recorded") is not (ipure.get("ok") is True)
                     or checks.get("ipqs_recorded") is not True
                     or checks.get("ipx_recorded") is not True
@@ -655,9 +675,15 @@ async def verify() -> None:
         scorable = [
             record for record in node_records if record.get("status") in {"success", "partial"}
         ]
+        ipure_scored = sum(1 for record in scorable if record.get("score") is not None)
+        not_indexed = sum(
+            1
+            for record in scorable
+            if record["requests"]["ipure"].get("error_type") == IPURE_NOT_INDEXED
+        )
         print(
-            f"IPure 评分覆盖：{len(scorable)}/{total} 个节点获得纯净度总分与六项场景评分"
-            f"（失败节点没有出口 IP，无法查询）"
+            f"IPure 评分覆盖：{ipure_scored}/{total} 个节点获得纯净度总分与六项场景评分，"
+            f"{not_indexed} 个 IPure 未收录（失败节点没有出口 IP，无法查询）"
         )
         via_proxy = sum(
             1 for record in scorable if record["requests"]["ipqs"].get("via_mihomo") is True
@@ -674,14 +700,22 @@ async def verify() -> None:
             f"其中 {ipx_via_proxy} 个经节点代理、{len(scorable) - ipx_via_proxy} 个走宿主直连兜底"
         )
         sources = [record.get("network_source") or {} for record in scorable]
+        groups = {"exit_ip": "出口 IP 确认", "geo": "地区", "isp": "服务商", "kind": "接入",
+                  "native": "原生性"}
+        names = ("ipx", "who", "ipqs", "ipure", "coffee")
         print(
-            f"归属来源：地区 who {sum(s.get('geo') == 'who' for s in sources)} / "
-            f"1ms 共识 {sum(s.get('geo') == 'ipqs' for s in sources)} / "
-            f"IPure {sum(s.get('geo') == 'ipure' for s in sources)}；"
-            f"服务商 who {sum(s.get('isp') == 'who' for s in sources)} / "
-            f"1ms 共识 {sum(s.get('isp') == 'ipqs' for s in sources)} / "
-            f"IPure {sum(s.get('isp') == 'ipure' for s in sources)}"
-            f"（共 {len(scorable)} 个有出口 IP 的节点）"
+            "归属来源："
+            + "；".join(
+                f"{label} "
+                + " / ".join(f"{name} {sum(s.get(key) == name for s in sources)}" for name in names)
+                for key, label in groups.items()
+            )
+            + f"（共 {len(scorable)} 个有出口 IP 的节点）"
+        )
+        exit_sources = [record["proxy_evidence"].get("exit_ip_source") for record in scorable]
+        print(
+            "出口 IP 定于："
+            + " / ".join(f"{name} {exit_sources.count(name)}" for name in ("trace", "ipx", "who"))
         )
         _require_no_failed_nodes(job)
         print(

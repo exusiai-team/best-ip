@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import hashlib
 import ipaddress
 import re
 from math import isfinite
@@ -19,8 +17,6 @@ from .http import (
     _validate_coffee_url,
 )
 from .values import _clean_text, _is_finite_number, _numeric_score
-
-RELATED_POLL_BUDGET_SECONDS = 20
 
 
 async def request(
@@ -90,59 +86,6 @@ async def request(
         }
 
 
-async def related_result(
-    transport: ProxyTransport,
-    client: httpx.AsyncClient,
-    exit_ip: str,
-    lookup_data: dict[str, Any],
-) -> dict[str, Any]:
-    url = f"{COFFEE_ORIGIN}/api/ip/related/{exit_ip}"
-    if not (lookup_data.get("related_pending") or lookup_data.get("related_domains_pending")):
-        return _missing_result(url, "lookup 已包含关联域名，无需轮询", skipped=True)
-
-    attempts: list[dict[str, Any]] = []
-    result: dict[str, Any] = _missing_result(url, "关联域名轮询未开始")
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + min(transport.timeout_seconds, RELATED_POLL_BUDGET_SECONDS)
-    still_pending = True
-    for attempt in range(1, 11):
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            break
-        if attempt > 1:
-            await asyncio.sleep(min(1.5, remaining))
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                break
-        request_timeout = min(transport.deadline(8), remaining)
-        try:
-            result = await asyncio.wait_for(
-                request(
-                    transport,
-                    client,
-                    url,
-                    payload="json",
-                    timeout_seconds=request_timeout,
-                ),
-                timeout=remaining,
-            )
-        except TimeoutError:
-            break
-        attempts.append(_without_data(result))
-        data = result.get("data") if isinstance(result.get("data"), dict) else {}
-        still_pending = bool(data.get("pending") or data.get("related_domains_pending"))
-        if not result.get("ok") or not still_pending:
-            break
-    if still_pending:
-        result = {
-            **result,
-            "ok": False,
-            "error": "关联域名轮询超过时间预算",
-            "error_type": "PollBudgetExceeded",
-        }
-    return {**result, "poll_attempts": attempts, "poll_count": len(attempts)}
-
-
 def parse_response(response: httpx.Response, payload: str) -> tuple[Any, str | None]:
     data: Any = None
     parse_error: str | None = None
@@ -153,29 +96,6 @@ def parse_response(response: httpx.Response, payload: str) -> tuple[Any, str | N
             parse_error = "响应不是有效 JSON"
     elif payload == "text":
         data = response.text[:20000]
-    elif payload == "html":
-        body = response.content
-        title_match = re.search(
-            rb"<title[^>]*>(.*?)</title>",
-            body,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        title = (
-            re.sub(
-                r"\s+",
-                " ",
-                title_match.group(1).decode("utf-8", errors="replace"),
-            ).strip()
-            if title_match
-            else ""
-        )
-        data = {
-            "content_type": response.headers.get("content-type", ""),
-            "content_length": len(body),
-            "sha256": hashlib.sha256(body).hexdigest(),
-            "title": title,
-            "contains_ip_result": b'id="result"' in body or b"id='result'" in body,
-        }
     else:
         raise ValueError(f"不支持的响应类型：{payload}")
 
@@ -528,13 +448,8 @@ def _ping_check_summary(response: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _related_domains(lookup_data: dict[str, Any], related_response: dict[str, Any]) -> list[Any]:
-    related_data = (
-        related_response.get("data") if isinstance(related_response.get("data"), dict) else {}
-    )
-    values = related_data.get("related_domains")
-    if not isinstance(values, list):
-        values = lookup_data.get("related_domains")
+def _related_domains(lookup_data: dict[str, Any]) -> list[Any]:
+    values = lookup_data.get("related_domains")
     return values if isinstance(values, list) else []
 
 
@@ -559,10 +474,6 @@ def _normalize_asn(value: Any) -> int | None:
             return None
         number = int(normalized)
     return number if 0 < number <= 4_294_967_295 else None
-
-
-def _without_data(result: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in result.items() if key != "data"}
 
 
 def _missing_result(url: str, message: str, *, skipped: bool = False) -> dict[str, Any]:

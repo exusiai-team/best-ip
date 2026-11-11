@@ -65,7 +65,7 @@ def test_ipqs_wins_kind_and_native_over_ipure_and_coffee():
     ipqs = parse_report(_stream(DONE), ipqs_url(IP))
     ipure = {"usage_type": "residential", "is_residential": True, "is_native": True}
     coffee = {"is_residential": True, "is_native": True, "location": ""}
-    identity = _network_identity(IP, None, ipure, ipqs, coffee)
+    identity = _network_identity(IP, "trace", None, None, ipure, ipqs, coffee)
     assert identity["usage_type"] == "hosting"
     assert identity["is_datacenter"] is True
     assert identity["is_native"] is False
@@ -76,7 +76,7 @@ def test_ipqs_wins_kind_and_native_over_ipure_and_coffee():
 
 def test_identity_falls_back_to_ipure_without_ipqs():
     ipure = {"usage_type": "residential", "is_residential": True, "is_native": True}
-    identity = _network_identity(IP, None, ipure, None, {"location": ""})
+    identity = _network_identity(IP, "trace", None, None, ipure, None, {"location": ""})
     assert identity["network_source"]["kind"] == "ipure"
     assert identity["network_source"]["native"] == "ipure"
 
@@ -106,7 +106,7 @@ def test_parse_me_keeps_identity_and_drops_echoed_headers():
 def test_who_wins_geo_isp_and_rdns_over_ipqs_and_ipure():
     ipqs = parse_report(_stream({**DONE, "summary": {**DONE["summary"], "asn": 1, "org": "X"}}),
                         ipqs_url(IP))
-    identity = _network_identity(IP, parse_me(WHO_ME), IPURE_NETWORK, ipqs, {})
+    identity = _network_identity(IP, "trace", None, parse_me(WHO_ME), IPURE_NETWORK, ipqs, {})
     source = identity["network_source"]
     assert (source["exit_ip"], source["geo"], source["isp"]) == ("who", "who", "who")
     assert identity["country_code"] == "JP"
@@ -126,7 +126,8 @@ def test_who_for_another_ip_is_ignored_and_ipqs_takes_over():
                                      "org": "KDDI", "host": "x.kddi.ne.jp"}}),
         ipqs_url(IP),
     )
-    identity = _network_identity(IP, parse_me({**WHO_ME, "ip": "198.51.100.1"}), {}, ipqs, {})
+    who = parse_me({**WHO_ME, "ip": "198.51.100.1"})
+    identity = _network_identity(IP, "trace", None, who, {}, ipqs, {})
     source = identity["network_source"]
     assert (source["exit_ip"], source["geo"], source["isp"]) == ("coffee", "ipqs", "ipqs")
     assert (identity["country_code"], identity["city"]) == ("JP", "Osaka")
@@ -136,7 +137,7 @@ def test_who_for_another_ip_is_ignored_and_ipqs_takes_over():
 
 def test_identity_never_falls_back_to_coffee_for_geo_or_isp():
     coffee = {"location": "Coffee Land", "isp": "Coffee ISP", "asn": 1}
-    identity = _network_identity(IP, None, None, None, coffee)
+    identity = _network_identity(IP, "trace", None, None, None, None, coffee)
     source = identity["network_source"]
     assert (source["geo"], source["isp"]) == (None, None)
     assert (identity["location"], identity["isp"], identity["asn"]) == ("", "", None)

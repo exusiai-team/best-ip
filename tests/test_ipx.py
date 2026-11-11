@@ -6,6 +6,7 @@ import pytest
 
 from backend.app.results.validation import ResultStoreError, validate_node
 from backend.app.sources import ipx as ipx_source
+from backend.app.sources.collector import _network_identity
 from backend.app.sources.http import IPX_SELF_URL, _validate_ipx_url
 from backend.app.sources.ipx import ipx_fields, ipx_report_url, parse_report
 
@@ -29,6 +30,10 @@ REPORT = {
     "native": {"verdict": "broadcast", "regCountry": "US"},
     "type": {"verdict": "hosting"},
     "generatedAt": "2026-11-11T07:45:37.631Z",
+    "asn": 16509,
+    "org": "AMAZON-02 - Amazon.com, Inc.",
+    "hostname": "ec2-203-0-113-7.compute.amazonaws.com",
+    "location": {"country": "sg", "city": "Singapore", "timezone": "Asia/Singapore"},
 }
 
 
@@ -40,6 +45,54 @@ def test_parse_report_keeps_score_grade_and_real_items():
     assert report["native"] is False
     assert [item["points"] for item in report["items"]] == [-8, 0]
     assert report["report_url"] == f"https://ipx.al/{IP}"
+
+
+def test_parse_report_reads_identity():
+    report = parse_report(REPORT)
+    assert (report["country_code"], report["city"], report["asn"]) == ("SG", "Singapore", 16509)
+    assert report["as_org"] == "AMAZON-02 - Amazon.com, Inc."
+    assert report["isp"] == "Amazon.com, Inc."
+    assert report["hostname"] == "ec2-203-0-113-7.compute.amazonaws.com"
+    assert (report["usage_type"], report["registered_country"]) == ("hosting", "US")
+
+
+def test_parse_report_drops_unknown_identity_vocabulary():
+    report = parse_report(
+        {**REPORT, "type": {"verdict": "cdn"}, "asn": 0, "location": {"country": "Earth"}}
+    )
+    assert (report["usage_type"], report["type_verdict"]) == (None, "cdn")
+    assert (report["asn"], report["country_code"]) == (None, None)
+
+
+def test_ipx_isp_type_is_residential():
+    assert parse_report({**REPORT, "type": {"verdict": "isp"}})["usage_type"] == "residential"
+
+
+def test_ipx_wins_every_identity_group():
+    who = {"ip": IP, "country_code": "SG", "region": "Central", "city": "X", "asn": 1,
+           "as_org": "who org", "ptr": "who.ptr"}
+    ipqs = {"country": "jp", "type": "residential", "native": True, "asn": 2, "org": "q"}
+    identity = _network_identity(IP, "trace", parse_report(REPORT), who, {}, ipqs, {})
+    assert identity["network_source"] == {
+        "exit_ip": "ipx", "geo": "ipx", "isp": "ipx", "kind": "ipx", "native": "ipx",
+    }
+    assert (identity["country_code"], identity["city"]) == ("SG", "Singapore")
+    # ipx 不给省/州：同国的 who 补上。
+    assert identity["region"] == "Central"
+    assert (identity["asn"], identity["isp"]) == (16509, "Amazon.com, Inc.")
+    assert identity["rdns"] == "ec2-203-0-113-7.compute.amazonaws.com"
+    assert (identity["usage_type"], identity["is_datacenter"]) == ("hosting", True)
+    assert identity["is_native"] is False
+    assert identity["native_status"] == "广播 IP (US)"
+
+
+def test_ipx_report_for_another_ip_is_ignored():
+    ipqs = {"country": "jp", "type": "residential", "native": True}
+    report = parse_report({**REPORT, "ip": "198.51.100.1"})
+    identity = _network_identity(IP, "trace", report, None, {}, ipqs, {})
+    assert identity["network_source"]["geo"] == "ipqs"
+    assert identity["network_source"]["kind"] == "ipqs"
+    assert identity["network_source"]["exit_ip"] == "coffee"
 
 
 @pytest.mark.parametrize(
@@ -167,4 +220,22 @@ def test_validator_rejects_direct_score_presented_as_proxy_evidence(make_success
     record = _with_ipx(make_success(0), direct=True)
     record["proxy_evidence"]["ipx_via_direct_fallback"] = False
     with pytest.raises(ResultStoreError, match="出口证据无效"):
+        validate_node(record["job_id"], 0, record)
+
+
+def test_validator_accepts_ipx_sourced_identity(make_success):
+    record = _with_ipx(make_success(0))
+    record["network_source"] = {
+        "exit_ip": "ipx", "geo": "ipx", "isp": "ipx", "kind": "ipx", "native": "ipx",
+    }
+    validate_node(record["job_id"], 0, record)
+
+
+def test_validator_rejects_ipx_source_without_a_report_for_this_ip(make_success):
+    record = _with_ipx(make_success(0), ipx_score=None, ipx_grade=None)
+    record["requests"]["ipx"]["data"] = parse_report({**REPORT, "ip": "198.51.100.1"})
+    record["network_source"] = {
+        "exit_ip": "ipx", "geo": "ipx", "isp": None, "kind": None, "native": None,
+    }
+    with pytest.raises(ResultStoreError, match="ipx.al 来源"):
         validate_node(record["job_id"], 0, record)

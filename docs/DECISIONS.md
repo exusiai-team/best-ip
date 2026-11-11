@@ -11,23 +11,27 @@
 - **DNS 引导出口只用全局 IPv4 字面量节点**，按 `(节点序号 + 尝试次数)` 轮换。DoH 解析器都是 IPv4 字面量，引导出口必须能由本机 IPv4 栈到达；IPv6 出口靠 WARP，不稳时不能让整次尝试的 DNS 跟着倒。
 - **托管 runner 的 IPv6 出口由 Cloudflare WARP 补**（`scripts/warp_ipv6.sh`，scan.yml 里 `continue-on-error`）。runner 自身没有 IPv6 默认路由（actions/runner-images#668，官方 wontfix）；两次正式扫描里按名字可辨的 IPv6 节点 22/22 失败，全是「网络不可达」。每次现注册免费账户、自己生成密钥，只把 `::/0` 接进隧道，IPv4 原样直连。不用 `fscarmen/warp-on-actions`：它写死了一把所有使用者共用的私钥，而且这个 job 有 `id-token: write`，第三方 action 能替我们领订阅。
 - **WARP 不装包、在后台建**：`apt-get install wireguard-tools` 的 dpkg 触发器占了这一步 9~16 秒的大头；现在只要 `wg` 一个二进制（随 Python 环境按天缓存，缺了就 `apt-get download` 后解包），用 `ip` + `wg set` 直接起接口、加一条 `::/0` 路由，不用 wg-quick 的策略路由（端点是 IPv4，不会绕回隧道）。runner 实测冷启动 3.9 秒、缓存命中 1.6 秒，且与领取订阅、装 Mihomo 重叠，扫描前一步才等它落定。
-- **按 IP 查询可以抢跑，但出口 IP 仍以 trace 为准**：页面、trace、who、ipx `/json`、GPT 探测都在第 0 秒发出；trace、who、ipx 谁先给出 IP，lookup / ping / 端口 / IPure / IPQS / ipx 核对就先按它开跑，页面不再挡在前面。trace 回来的 IP 不一致（多出口节点）或没给出 IP 时，抢跑的整组取消，按 trace 重发或跳过，所以记录里的 URL、`exit_ip` 与校验口径都不变。1ms IPQS 在服务端等齐十余个源才给 `done`，稳定约 4.5 秒，是单节点耗时的下限，省下来的就是它前面那段等待。
+- **按 IP 查询可以抢跑；出口 IP 以 trace 为准，trace 没给出时退回 ipx / who 回显**：trace、who、ipx `/json`、GPT 探测都在第 0 秒发出；trace、who、ipx 谁先给出 IP，lookup / ping / 端口 / IPure / IPQS / ipx 核对就先按它开跑。trace 回来的 IP 不一致（多出口节点）时抢跑的整组取消、按 trace 重发。trace 没给出 IP（Coffee 不通或限流）时用经节点代理的回显（ipx 优先），`proxy_evidence.exit_ip_source` 记下是谁定的——原来 Coffee 一家出故障就让整轮扫描全部失败，而 ipx / who 问的同样是「这条连接的出口」（2026-11-11）。1ms IPQS 在服务端等齐十余个源才给 `done`，稳定约 4.5 秒，是单节点耗时的下限，省下来的就是它前面那段等待。
+- **节点只在找不到出口 IP 时失败；有出口 IP 而缺了页面上某一列分数（ipx / Coffee lookup / 1ms / IPure）才算「部分」**（`completeness.partial_reasons`）。who、全球 Ping、端口、连通检测只作证据，缺了不降级；原来 11 个可选项任一缺失都算部分，「部分」几乎不携带信息。不再请求 Coffee 页面（只用来算标题和 sha256，与 trace 的成功集合 36/36 相同，却是必需项）和关联域名轮询（页面不展示；正式订阅 43 个节点只触发 2 次）。lookup 上限 45 秒 → 10 秒（实测 p90 0.9s、最慢 2.1s）（2026-11-11）。
+- **暂不按出口 IP 去重**：正式订阅 36 个出口里不同 IP 28 个（重复 22%），而同出口的节点多半同时在跑，复用要做跨节点的单飞缓存，且记录里的代理证据会变成「另一个节点代我问的」。省下的是上游请求数而不是墙钟，等 `scan_timing` 的 `unique_exit_ips` 显示重复率明显升高、或上游开始限流再做。
 - **双栈节点 `ip-version: ipv4-prefer`**（订阅自己写了的照它的来）：IPv6 出口是隧道，多一跳、出口也变了，只留给只有 IPv6 的节点。
 - **不换 sing-box**：两次正式扫描 274 个节点里只有 1 个是「配置不受支持」（vless XHTTP，原版 sing-box 也不支持），其余失败全是连通性问题；换内核预计多不出节点。
 - **Mihomo 就绪 = 控制端口应答且 selector 组已注册**。控制端口先接客、tunnel 后填充，只看 `/version` 会 404 打掉健康节点。
-- **扫描日志一行 `scan_timing`**（只有数字）：产物 1 天后过期，事后靠这一行定位耗时在哪一相。调节点侧参数前先看它。
+- **扫描日志一行 `scan_timing`**（只有数字）：产物 1 天后过期，事后靠这一行定位耗时在哪一相、哪个上游。`sources[...]` 是各上游「成功数/请求数:p50/p90/max」，另有 `direct_fallback[...]` 与 `exit_ips / unique_exit_ips`；不含 IP 本身。调节点侧参数前先看它。
 
 ## 数据与评分
 
 - **IPure 以官方 `/docs/api` 为准**：`GET /api/lookup?ip=`，不带凭据，六个场景（ai / social / streaming / gaming / ecommerce / email）。
 - **评分取值域 `0..100 ∪ {-1} ∪ {null}`**：`-1` 表示上游标了地区受限，由后端写入，前端不推导，显示成中性灰的 `-1`；`score` 必须等于 `ipure_scores.total`。
-- **地区、服务商、服务器名以 1ms who 为准，不再回落 Coffee**：who → 1ms IPQS 共识 → IPure；`network_source` 记录每组来源。who 的 `/api/me` 经节点代理问「网站看到的这条连接」，Cloudflare 给国家/地区/城市/ASN/AS 组织，另给 PTR（写进 `rdns`）。它只认调用方，所以没有宿主直连兜底（直连会描述扫描机自己），回显 IP 与 trace 出口不一致（多出口节点）时整组让给按 IP 查询的来源。who 只给国家代码，国名由前端按代码本地化成中文；IPure 的英文国名在代码一致时保留在 `country`。`exit_ip` 仍由 Coffee trace 发现，who 回显一致时记为 who 确认。
+- **归属信息以 ipx.al 为准**（2026-11-11，按所有者要求「大多数内容来自 ipx」）：地区、服务商、服务器名、接入、原生性五组都先取 ipx `/json` 同一份报告（它本来就为健康分发出，不多一个请求），依次回落 who → 1ms IPQS 共识 → IPure，接入与原生性最后回落 Coffee。ipx 的类型本身是七个来源投票，`isp` 是它的「家宽」（类型上限 100），映射为 residential。正式订阅验收 34/34 个有出口 IP 的节点五组全部来自 ipx。以下 who 条目描述的是回落时的行为。
+- **地区、服务商、服务器名在 ipx 缺数据时以 1ms who 为准，不再回落 Coffee**：who → 1ms IPQS 共识 → IPure；`network_source` 记录每组来源。who 的 `/api/me` 经节点代理问「网站看到的这条连接」，Cloudflare 给国家/地区/城市/ASN/AS 组织，另给 PTR（写进 `rdns`）。它只认调用方，所以没有宿主直连兜底（直连会描述扫描机自己），回显 IP 与 trace 出口不一致（多出口节点）时整组让给按 IP 查询的来源。who 只给国家代码，国名由前端按代码本地化成中文；IPure 的英文国名在代码一致时保留在 `country`。`exit_ip` 仍由 Coffee trace 发现，who 回显一致时记为 who 确认。
 - **表格默认按 1ms 综合分、再按 IPure 总分降序**；分数列顺序按用户指定为 ipx → Coffee → 1ms → IPure（+ 六项场景）。出口 IP 下一行显示服务器名（PTR），国家下一行显示城市。
 - **数据来源在页面顶部统一引用官网，不在每个分数格放图标**：逐格图标挤占分数列、读起来像装饰，引用一次就够。节点 / IP / 地区 / 服务商默认收起（省略 + title 全文），表格最小宽从 1478px 降到 1320px（服务商列收起时只留 96px），1440 视口里分数列全部可见；需要读全文时一键展开（1558px）。
 - **ipx 字母等级由前端按分数换算**：ipx API 只给分数和中文词，网页上的「A+ / A / B / C / D」是它页面脚本按 85 / 70 / 50 / 30 门槛现算的，不在 API 里。照抄门槛（`render.js` 的 `ipxLetter`），不进记录、不进校验：它是展示层派生值，门槛变了只改一处。
-- **接入与原生性改由 1ms IPQS 优先**（1ms → IPure → Coffee），并新增一列 1ms 综合评分。1ms 的 `/api/check` 对十余个源投票，比单一来源的判断稳；只读 NDJSON 末尾的 `done` 事件。网页另有两个只在浏览器里跑的源（ipinfo、ipwho），核对过页面代码：它们只给地理、ASN、主机名，不给类型、匿名标记和风险值，因此 `done.score` 就是网页显示的分数。没有在后端复刻 1ms 的聚合算法：那等于长期追一个别人的私有实现，分数还会悄悄漂移。记录只新增 `ipqs_score` / `ipqs_grade` / `ipqs_report_url`，类型与原生性并入已有的 `usage_type` / `is_native`，不另立平行字段。
-- **新增 ipx.al 健康分，用 `/json` 而不是 `/api/report/{ip}`**：实测各源单次耗时 Coffee trace ≈1.2s、lookup ≈0.6s、who ≈1.4s、1ms IPQS ≈5s、ipx ≈4–8s（2026-11-11，宿主直连）。ipx 是最慢的一个，若排在 trace 之后会把每个节点拉长；`/json` 只认调用方，经节点代理问就是节点出口，于是和 trace、who 一起在第 0 秒发出，耗时被 lookup / IPQS 覆盖。代价是多出口节点可能回报另一个 IP，所以回显不一致时改由宿主按 IP 查（文档相同，只是视角不同，记为直连兜底）。只取分数、等级与报告页地址；类型与原生性仍由 1ms 共识决定，不另立第二套归属链。
+- **接入与原生性在 ipx 缺数据时由 1ms IPQS 优先**（1ms → IPure → Coffee），并新增一列 1ms 综合评分。1ms 的 `/api/check` 对十余个源投票，比单一来源的判断稳；只读 NDJSON 末尾的 `done` 事件。网页另有两个只在浏览器里跑的源（ipinfo、ipwho），核对过页面代码：它们只给地理、ASN、主机名，不给类型、匿名标记和风险值，因此 `done.score` 就是网页显示的分数。没有在后端复刻 1ms 的聚合算法：那等于长期追一个别人的私有实现，分数还会悄悄漂移。记录只新增 `ipqs_score` / `ipqs_grade` / `ipqs_report_url`，类型与原生性并入已有的 `usage_type` / `is_native`，不另立平行字段。
+- **新增 ipx.al 健康分，用 `/json` 而不是 `/api/report/{ip}`**：实测各源单次耗时 Coffee trace ≈1.2s、lookup ≈0.6s、who ≈1.4s、1ms IPQS ≈5s、ipx ≈4–8s（2026-11-11，宿主直连）。ipx 是最慢的一个，若排在 trace 之后会把每个节点拉长；`/json` 只认调用方，经节点代理问就是节点出口，于是和 trace、who 一起在第 0 秒发出，耗时被 lookup / IPQS 覆盖。代价是多出口节点可能回报另一个 IP，所以回显不一致时改由宿主按 IP 查（文档相同，只是视角不同，记为直连兜底）。起初只取分数、等级与报告页地址；2026-11-11 起它也是归属信息的首选来源（见上）。
 - **扫描用的 Mihomo 是域名白名单**（未列出的一律 `MATCH,REJECT`）：新增任何经节点访问的数据源都必须把主机加进 `mihomo.py` 的 `rules`。主机常量从 `sources/http.py` import，不另抄一份。漏掉时请求会全部「成功」地走宿主直连兜底，表面看不出来（1ms 首轮真实验收就是 23/23 直连）；所以兜底成功时也会记下 `requests.ipqs.proxy_error`，`verify_real_scan.py` 会打印经代理与走直连的节点数。
+- **IPure 未收录的 IP 记为「未收录」，不算部分**：匿名 `/api/lookup` 对没收录的 IP 返回 `401 invalid_api_key`（要 API Key 才做实时检测），正式订阅 36 个出口里 13 个如此，原来全被记成「部分」。直连同样拿不到，所以不兜底；`requests.ipure.error_type = "NotIndexed"`，页面写「IPure 未收录该 IP」。
 - **色带复刻 ipure.dev 的五段渐变**，锚点按 Coffee 的亮度带重新取色，保证对比度过 AA。
 
 ## 结果与校验

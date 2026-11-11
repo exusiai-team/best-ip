@@ -49,7 +49,7 @@ def _exported(store, records):
         (lambda r: r["ipure_scores"].update(ai=101), "取值无效"),
         (lambda r: r["ipure_scores"].update(ai=-2), "取值无效"),
         (lambda r: r.update(score=70), "不一致"),
-        (lambda r: r["completeness"]["checks"].update(lookup_matches_trace=False), "证据无效"),
+        (lambda r: r["completeness"]["checks"].update(exit_ip_valid=False), "证据无效"),
         (lambda r: r["proxy_evidence"].update(proxy_url="http://10.0.0.1:1"), "证据无效"),
         (lambda r: r.update(exit_ip="not-an-ip"), "IP"),
         (lambda r: r.update(unexpected=1), "字段集合"),
