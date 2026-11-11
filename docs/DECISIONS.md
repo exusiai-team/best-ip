@@ -10,6 +10,8 @@
 - **IPure 宿主直连兜底超时 5 秒**（原 20 秒）；退避上限 2 秒。
 - **DNS 引导出口只用全局 IPv4 字面量节点**，按 `(节点序号 + 尝试次数)` 轮换。DoH 解析器都是 IPv4 字面量，引导出口必须能由本机 IPv4 栈到达；IPv6 出口靠 WARP，不稳时不能让整次尝试的 DNS 跟着倒。
 - **托管 runner 的 IPv6 出口由 Cloudflare WARP 补**（`scripts/warp_ipv6.sh`，scan.yml 里 `continue-on-error`）。runner 自身没有 IPv6 默认路由（actions/runner-images#668，官方 wontfix）；两次正式扫描里按名字可辨的 IPv6 节点 22/22 失败，全是「网络不可达」。每次现注册免费账户、自己生成密钥，只把 `::/0` 接进隧道，IPv4 原样直连。不用 `fscarmen/warp-on-actions`：它写死了一把所有使用者共用的私钥，而且这个 job 有 `id-token: write`，第三方 action 能替我们领订阅。
+- **WARP 不装包、在后台建**：`apt-get install wireguard-tools` 的 dpkg 触发器占了这一步 9~16 秒的大头；现在只要 `wg` 一个二进制（随 Python 环境按天缓存，缺了就 `apt-get download` 后解包），用 `ip` + `wg set` 直接起接口、加一条 `::/0` 路由，不用 wg-quick 的策略路由（端点是 IPv4，不会绕回隧道）。runner 实测冷启动 3.9 秒、缓存命中 1.6 秒，且与领取订阅、装 Mihomo 重叠，扫描前一步才等它落定。
+- **按 IP 查询可以抢跑，但出口 IP 仍以 trace 为准**：页面、trace、who、ipx `/json`、GPT 探测都在第 0 秒发出；trace、who、ipx 谁先给出 IP，lookup / ping / 端口 / IPure / IPQS / ipx 核对就先按它开跑，页面不再挡在前面。trace 回来的 IP 不一致（多出口节点）或没给出 IP 时，抢跑的整组取消，按 trace 重发或跳过，所以记录里的 URL、`exit_ip` 与校验口径都不变。1ms IPQS 在服务端等齐十余个源才给 `done`，稳定约 4.5 秒，是单节点耗时的下限，省下来的就是它前面那段等待。
 - **双栈节点 `ip-version: ipv4-prefer`**（订阅自己写了的照它的来）：IPv6 出口是隧道，多一跳、出口也变了，只留给只有 IPv6 的节点。
 - **不换 sing-box**：两次正式扫描 274 个节点里只有 1 个是「配置不受支持」（vless XHTTP，原版 sing-box 也不支持），其余失败全是连通性问题；换内核预计多不出节点。
 - **Mihomo 就绪 = 控制端口应答且 selector 组已注册**。控制端口先接客、tunnel 后填充，只看 `/version` 会 404 打掉健康节点。

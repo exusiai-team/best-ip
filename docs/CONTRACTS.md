@@ -234,8 +234,9 @@ consensus (`summary.asn/org`) → IPure. `rdns`: who `ptr` → 1ms `summary.host
 Kind (`usage_type`, `is_residential`, `is_datacenter` = hosting) and native (`is_native`,
 `native_status`, `native_detail`): 1ms IPQS → IPure → Coffee. Geo and ISP never fall back to
 Coffee. `network_source = {exit_ip, geo, isp, kind, native}` (each `"who"`, `"ipqs"`,
-`"ipure"`, `"coffee"` or null) says who supplied each group; `exit_ip` is discovered by the
-Coffee trace and marked `"who"` / `"ipure"` when that source echoed the same address. Any
+`"ipure"`, `"coffee"` or null) says who supplied each group; `exit_ip` is decided by the
+Coffee trace (by-IP requests may start early on an IP echoed by who or ipx `/json`, but are
+cancelled and reissued when the trace disagrees) and marked `"who"` / `"ipure"` when that source echoed the same address. Any
 group credited to `"who"` requires `requests.who` with `ok:true`, `via_mihomo:true` and a
 `data.ip` equal to `exit_ip`. A missing who answer makes the node `partial`
 (`completeness.checks.who_recorded`). The identity fields are optional — artifacts
