@@ -601,10 +601,10 @@ code { font-family: var(--font-mono); }
 
 .grid {
   width: 100%;
-  /* 1340px = 长文本列收起时 colgroup 各列宽之和（render.js 的 COLUMNS 的 width）；展开时
+  /* 1312px = 长文本列收起时 colgroup 各列宽之和（render.js 的 COLUMNS 的 width）；展开时
      是 fullWidth 之和 1550px。低于这个数浏览器就开始挖列宽，表头的列名 + 排序箭头会被挤到
      折行，所以宁可横向滚动也不压缩。收起态在 1440 视口（可用 1392px）里放得下全部分数列。 */
-  min-width: 1340px;
+  min-width: 1312px;
   border-collapse: separate;
   border-spacing: 0;
   font-variant-numeric: tabular-nums;
@@ -903,7 +903,9 @@ select.filter-input {
 /* 收起时出口 IP 列也只吃 colgroup 给的预算：IPv6 地址最长 39 个字符，不压住会把分数列挤出视口。
    全文在 title 里（出口 IP 单击即全选，复制按钮照常可用）。 */
 @media (min-width: 901px) {
-  .grid[data-long="compact"] .cell-ip { max-width: 0; overflow: hidden; }
+  /* max-width: 0 让这两列只吃 colgroup 的预算：表格比列宽之和宽时，多出来的宽度不会按内容
+     长度分给长 ISP 名，而是留给分数列。 */
+  .grid[data-long="compact"] :is(.cell-ip, .cell-isp) { max-width: 0; overflow: hidden; }
   /* 复制按钮只留图标（按钮的 title / aria-label 仍写着「复制出口 IP」），IPv4 最长 15 字符能完整放下，
      只有 IPv6 才会省略。 */
   .grid[data-long="compact"] .cell-ip .copy-lbl { display: none; }
