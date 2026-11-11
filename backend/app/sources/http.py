@@ -77,7 +77,10 @@ class ProxyTransport:
             timeout=httpx.Timeout(self.timeout_seconds, connect=min(self.timeout_seconds, 12)),
             follow_redirects=False,
             trust_env=False,
-            limits=httpx.Limits(max_connections=8, max_keepalive_connections=8, keepalive_expiry=5),
+            # 一个节点同时在途约 12 个请求（第 0 秒 6 个 + 拿到出口 IP 后 6 个），上限给足免排队。
+            limits=httpx.Limits(
+                max_connections=16, max_keepalive_connections=16, keepalive_expiry=5
+            ),
             headers={"User-Agent": "Mozilla/5.0 best-ip/0.3 (workspace Mihomo)"},
         )
 

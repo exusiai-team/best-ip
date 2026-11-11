@@ -28,20 +28,45 @@ jobs:
   scan:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    # 精简过的准备段（约 2~3 秒）：
+    # 精简过的准备段：
     # - 校验输入、写 IPure 配置、凭 OIDC 向 Worker 领取订阅合成一步；
     # - 不锁版本：Python 依赖按 pyproject.toml 解析最新，Mihomo 取最新 release。
     # - Python 解释器（uv 管理的 3.13）+ .venv 按天缓存：每天第一次扫描走「装 uv → uv sync」重新解析
     #   最新依赖（约 3 秒），同一天内后续扫描直接用 .venv/bin/python。
     # - Mihomo 每次取 latest（带 GITHUB_TOKEN 避免 API 限流），用 GitHub 给的资产摘要校验。
+    # - WARP IPv6 出口在后台建（约 3~5 秒），与领取订阅、装 Mihomo 重叠，扫描前再等它落定。
     env:
       BEST_IP_PYTHON_DIR: /home/runner/.best-ip/python
+      BEST_IP_TOOLS_DIR: /home/runner/.best-ip/bin
     steps:
       - name: Checkout default branch
         uses: actions/checkout@v7
         with:
           ref: main
           persist-credentials: false
+
+      - name: Pick today's environment cache key
+        id: day
+        run: echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Python environment
+        id: env-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            .venv
+            /home/runner/.best-ip/python
+            /home/runner/.best-ip/bin
+          key: best-ip-env-${{ runner.os }}-cpython3.13-${{ hashFiles('pyproject.toml') }}-${{ steps.day.outputs.day }}
+
+      # 托管 runner 没有 IPv6 出口：只把 ::/0 接进现注册的 Cloudflare WARP，IPv6-only 节点才连得上。
+      # 在后台跑，与后面几步重叠；结果在扫描前的「Wait for IPv6 egress」里收。
+      # 内联脚本而非第三方 action：这个 job 有 id-token: write。
+      - name: Start IPv6 egress through Cloudflare WARP (background)
+        shell: bash
+        run: |
+          nohup bash -c 'bash scripts/warp_ipv6.sh; echo $? > "$RUNNER_TEMP/warp.status"' \
+            > "$RUNNER_TEMP/warp.log" 2>&1 &
 
       - name: Validate inputs and claim subscription URL
         env:
@@ -59,19 +84,6 @@ jobs:
           node scripts/claim_subscription.mjs \
             --subscription-file "$RUNNER_TEMP/subscription-url" \
             --token-file "$RUNNER_TEMP/runner-token"
-
-      - name: Pick today's environment cache key
-        id: day
-        run: echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore Python environment
-        id: env-cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            .venv
-            /home/runner/.best-ip/python
-          key: best-ip-env-${{ runner.os }}-cpython3.13-${{ hashFiles('pyproject.toml') }}-${{ steps.day.outputs.day }}
 
       - name: Set up uv
         if: steps.env-cache.outputs.cache-hit != 'true'
@@ -98,13 +110,15 @@ jobs:
           .venv/bin/python scripts/download_mihomo.py
           .venv/bin/python -c 'from backend.app.sources.ipure_config import load_ipure_headers; headers = load_ipure_headers(); assert headers.get("cookie"), "IPure verification cookie is required"'
 
-      # 托管 runner 没有 IPv6 出口：只把 ::/0 接进现注册的 Cloudflare WARP，IPv6-only 节点才连得上。
-      # 失败不挡扫描（IPv6 节点照旧「网络不可达」）；内联脚本而非第三方 action：这个 job 有 id-token: write。
-      - name: Enable IPv6 egress through Cloudflare WARP
+      # 失败不挡扫描（IPv6 节点照旧「网络不可达」）。
+      - name: Wait for IPv6 egress
         continue-on-error: true
         timeout-minutes: 2
         shell: bash
-        run: bash scripts/warp_ipv6.sh
+        run: |
+          until [[ -f "$RUNNER_TEMP/warp.status" ]]; do sleep 0.2; done
+          cat "$RUNNER_TEMP/warp.log"
+          exit "$(cat "$RUNNER_TEMP/warp.status")"
 
       # 这一步也会把扫描进度（计数与每个节点的阶段，不含出口 IP 与评分）回报给 Worker 的
       # /api/scan-progress，与订阅中继同一个 Worker、同一张领取时拿到的 runner 令牌；回报失败不影响扫描。
