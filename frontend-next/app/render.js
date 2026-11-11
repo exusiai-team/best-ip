@@ -129,7 +129,7 @@ export const COLUMNS = [
   },
   // 分数区顺序：ipx → Coffee → 1ms → IPure（+ 六项场景）。
   {
-    key: "ipx", label: "ipx", width: "64px", align: "center", sort: "num", filter: "num",
+    key: "ipx", label: "ipx", width: "72px", align: "center", sort: "num", filter: "num",
     title: "ipx.al 健康分", group: "first",
     sortValue: (r) => r.ipx_score,
     filterValue: (r) => r.ipx_score,
@@ -528,7 +528,21 @@ function ipqsCell(document, result) {
 // ipx.al 的等级是中文词（https://ipx.al/about）：85 极佳 / 70 良好 / 50 一般 / 30 较差 / 其余高风险。
 const IPX_BANDS = { 极佳: "good", 良好: "good", 一般: "warn", 较差: "bad", 高风险: "bad" };
 
-/** ipx 健康分：形状同 1ms；等级是词，只放进 tooltip，格子里只有数字。 */
+/**
+ * ipx 的字母等级：API 只给分数和中文词（极佳…高风险），字母是 ipx.al 页面脚本按分数现算的
+ * （`s >= 85 ? 'A+' : s >= 70 ? 'A' : s >= 50 ? 'B' : s >= 30 ? 'C' : 'D'`，2026-11-11 核对）。
+ * 这里照抄同一套门槛，格子里显示的字母与 ipx 网页「健康分 · B」一致。
+ */
+export function ipxLetter(score) {
+  if (!Number.isFinite(score)) return null;
+  if (score >= 85) return "A+";
+  if (score >= 70) return "A";
+  if (score >= 50) return "B";
+  if (score >= 30) return "C";
+  return "D";
+}
+
+/** ipx 健康分：形状同 1ms，分数 + 字母等级；中文等级词与扣分项放进 tooltip。 */
 function ipxCell(document, result) {
   const score = result.ipx_score;
   const pill = el(document, "span", "score");
@@ -538,10 +552,12 @@ function ipxCell(document, result) {
     pill.title = result.exit_ip ? "ipx.al 未返回健康分" : "未连接成功，无 ipx 健康分";
   } else {
     pill.dataset.band = IPX_BANDS[result.ipx_grade] || "na";
-    pill.textContent = String(score);
+    const letter = ipxLetter(score);
+    pill.append(document.createTextNode(String(score)));
+    if (letter) pill.append(Object.assign(el(document, "small", "grade"), { textContent: letter }));
     const deductions = (result.ipx_deductions || []).map((item) => `${item.label} −${item.points}`);
     pill.title = [
-      `ipx 健康分 ${score}${result.ipx_grade ? ` · ${result.ipx_grade}` : ""}`
+      `ipx 健康分 ${score} · ${letter}${result.ipx_grade ? `（${result.ipx_grade}）` : ""}`
         + (result.ipx_ceiling !== null && result.ipx_ceiling !== undefined ? `（类型上限 ${result.ipx_ceiling}）` : ""),
       deductions.length ? `扣分：${deductions.join("，")}` : "无扣分项",
     ].join("\n");

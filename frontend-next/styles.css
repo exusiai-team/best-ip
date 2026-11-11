@@ -601,15 +601,15 @@ code { font-family: var(--font-mono); }
 
 .grid {
   width: 100%;
-  /* 1312px = 长文本列收起时 colgroup 各列宽之和（render.js 的 COLUMNS 的 width）；展开时
-     是 fullWidth 之和 1550px。低于这个数浏览器就开始挖列宽，表头的列名 + 排序箭头会被挤到
+  /* 1320px = 长文本列收起时 colgroup 各列宽之和（render.js 的 COLUMNS 的 width）；展开时
+     是 fullWidth 之和 1558px。低于这个数浏览器就开始挖列宽，表头的列名 + 排序箭头会被挤到
      折行，所以宁可横向滚动也不压缩。收起态在 1440 视口（可用 1392px）里放得下全部分数列。 */
-  min-width: 1312px;
+  min-width: 1320px;
   border-collapse: separate;
   border-spacing: 0;
   font-variant-numeric: tabular-nums;
 }
-.grid[data-long="expanded"] { min-width: 1550px; }
+.grid[data-long="expanded"] { min-width: 1558px; }
 
 .grid thead th {
   padding: 9px 10px;

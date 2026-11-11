@@ -52,7 +52,7 @@ Mihomo 默认安装最新 release，并用 GitHub 给出的资产摘要（`diges
 - 国家和地区、服务商 / ISP、ASN、服务器名（PTR）以 1ms who（https://who.1ms.dog）为准：经节点代理问「网站看到的这条连接是谁」，回显 IP 与出口一致才采信；它没给的那一组依次回落 1ms IPQS 多源共识与 IPure，不再回落 Coffee。接入（住宅 / 移动 / 商业 / 机房 / 教育 / 政府）与原生性由 1ms IPQS（https://ipqs.1ms.dog）的多源共识优先，依次回落 IPure（`usageType`、`nativeType`）与 Coffee；每组来源记在节点记录的 `network_source`，页面在对应单元格的 title 里标出「来源：1ms who / 1ms IPQS / IPure / Coffee」。
 - GitHub 托管 runner 没有 IPv6 出口，scan.yml 先用 `scripts/warp_ipv6.sh` 把 IPv6 接进 Cloudflare WARP（IPv4 不动），IPv6-only 节点才能检测；这一步失败不影响其余节点。
 - 1ms IPQS 另给一列综合评分（0..100，按扣分计，带 A–F 等级）：读 `GET /api/check?ip={ip}` 的 NDJSON 流末尾 `done` 事件，扣分明细写在分数的 tooltip 里，点分数打开 1ms 完整报告。出口 IP 仍由 trace 发现（IPure 查询必须带上一个 IP），IPure 回显一致时记为由 IPure 确认。
-- ipx.al（https://ipx.al）另给一列健康分（0..100 = 类型上限 − 风险扣分，等级 极佳 / 良好 / 一般 / 较差 / 高风险）：经节点代理请求 `GET /json`（问的是连接本身，与 trace 同时发出，不排在出口 IP 之后），回显 IP 与 trace 出口一致才采信；不一致或代理失败时由宿主按 IP 查 `GET /api/report/{ip}` 并记为直连兜底。扣分项写在分数的 tooltip 里。
+- ipx.al（https://ipx.al）另给一列健康分（0..100 = 类型上限 − 风险扣分，等级 极佳 / 良好 / 一般 / 较差 / 高风险）：经节点代理请求 `GET /json`（问的是连接本身，与 trace 同时发出，不排在出口 IP 之后），回显 IP 与 trace 出口一致才采信；不一致或代理失败时由宿主按 IP 查 `GET /api/report/{ip}` 并记为直连兜底。格子里分数旁显示字母等级（A+ ≥85 / A ≥70 / B ≥50 / C ≥30 / D），与 ipx 网页「健康分 · B」同一套门槛——API 不返回字母，是 ipx 页面脚本按分数现算的，前端照抄；中文等级词与扣分项写在 tooltip 里。
 - 分数列顺序为 ipx → Coffee → 1ms → IPure（后接六项场景分），分数格只放分数。各数据来源（1ms who / 1ms IPQS / ipx.al / IPure / Coffee）在页面顶部「数据来源」一行逐个引用官网，悬停说明各自提供哪些列；图标内嵌为 data URI，符合 CSP `img-src 'self' data:`，导出快照里同一行不带链接。
 - 节点、出口 IP、国家和地区、服务商四列默认收起（超出省略，悬停看全文），把宽度让给分数列；工具栏「展开长文本」换宽并折行显示全文。
 - Coffee 页面与 trace 并行；确认出口 IP 后，lookup、global ping、portscan、pingcheck、related、IPure 官方 `/api/lookup` 评分及 ChatGPT/Codex 探测按既定依赖并发执行。IPure 没有返回纯净度总分时，节点会如实标记为“部分”。
