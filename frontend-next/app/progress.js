@@ -102,7 +102,20 @@ export function normalizeProgress(raw) {
   if (completed > total || success + partial + failed !== completed) return null;
   const progress = { phase: raw.phase, total, completed, success, partial, failed };
   const nodes = normalizeNodes(raw.nodes, progress);
-  return nodes ? { ...progress, nodes } : progress;
+  if (!nodes) return progress;
+  const rows = normalizeRows(raw.rows, total);
+  return rows ? { ...progress, nodes, rows } : { ...progress, nodes };
+}
+
+/**
+ * 表格预览行（已落定为完整 / 部分的节点，见 worker/progress.js）：这里只核对外形，
+ * 每个值怎么归一由 records.js 的 toRows 负责——预览与 artifact 走同一个适配层。
+ */
+function normalizeRows(raw, total) {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > Math.min(total, 300)) return null;
+  const valid = raw.every((row) => row && typeof row === "object" && !Array.isArray(row)
+    && Number.isSafeInteger(row.node_index) && row.node_index >= 0 && row.node_index < total);
+  return valid ? raw : null;
 }
 
 function rank(stage) {

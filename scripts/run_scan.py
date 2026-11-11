@@ -264,7 +264,7 @@ async def _run_scan(
         )
         from backend.app.results.store import ResultStore, ResultStoreError
         from backend.app.scan.jobs import JobNotReadyError
-        from backend.app.scan.reporter import job_counts, live_nodes
+        from backend.app.scan.reporter import job_counts, live_nodes, live_rows
         from backend.app.subscription import (
             SubscriptionError,
             SubscriptionSource,
@@ -279,6 +279,7 @@ async def _run_scan(
     completed = False
     final_counts = None
     final_nodes = None
+    final_rows = None
     first_report: asyncio.Task[Any] | None = None
     follow_task: asyncio.Task[Any] | None = None
     source = SubscriptionSource()
@@ -361,7 +362,9 @@ async def _run_scan(
             await _stop_task(follow_task)
             follow_task = None
             final_counts = job_counts(manager.jobs.get(job_id))
-            final_nodes = live_nodes(read_nodes(), forbidden)
+            final_snapshot = read_nodes()
+            final_nodes = live_nodes(final_snapshot, forbidden)
+            final_rows = live_rows(final_snapshot, forbidden)
             print(
                 _timing_summary(
                     download_ms, job, final_nodes, _read_records(manager, job_id, job)
@@ -369,7 +372,7 @@ async def _run_scan(
                 file=sys.stderr,
             )
             if reporter is not None and job.get("status") == "completed":
-                await reporter.report("packaging", final_counts, final_nodes)
+                await reporter.report("packaging", final_counts, final_nodes, final_rows)
             if job.get("cleanup_confirmed") is not True:
                 raise ScanCLIError("cleanup_failed")
             if job.get("status") != "completed":
@@ -414,17 +417,11 @@ async def _run_scan(
             _remove_owned(owned)
     _publish(output, result, status)
     if reporter is not None:
-        await reporter.report("done", final_counts, final_nodes)
+        await reporter.report("done", final_counts, final_nodes, final_rows)
 
 
 def _seconds(ms: float) -> str:
     return f"{ms / 1000:.1f}s"
-
-
-# scan_timing 里逐源统计的请求（顺序即输出顺序）。
-_TIMED_SOURCES = (
-    "trace", "ipx", "ipqs", "ipure", "lookup", "who", "global_ping", "port_scan", "ping_check",
-)
 
 
 def _read_records(manager: Any, job_id: str, job: Any) -> list[dict[str, Any]]:
@@ -448,9 +445,13 @@ def _source_timing(records: list[dict[str, Any]]) -> list[str]:
 
     if not records:
         return []
+    from backend.app.sources.registry import SOURCES
+
     timings: list[str] = []
     fallbacks: list[str] = []
-    for name in _TIMED_SOURCES:
+    shared: list[str] = []
+    # 注册表的顺序即输出顺序。
+    for name in (source.name for source in SOURCES):
         requests = [
             record["requests"][name]
             for record in records
@@ -470,10 +471,15 @@ def _source_timing(records: list[dict[str, Any]]) -> list[str]:
         direct = sum(1 for item in requests if item.get("direct_fallback") is True)
         if direct:
             fallbacks.append(f"{name}={direct}")
+        reused = sum(1 for item in requests if item.get("shared") is True)
+        if reused:
+            shared.append(f"{name}={reused}")
     exit_ips = [record.get("exit_ip") for record in records if record.get("exit_ip")]
     parts = [f"sources[{' '.join(timings)}]"]
     if fallbacks:
         parts.append(f"direct_fallback[{' '.join(fallbacks)}]")
+    if shared:
+        parts.append(f"shared[{' '.join(shared)}]")
     parts.append(f"exit_ips={len(exit_ips)} unique_exit_ips={len(set(exit_ips))}")
     return parts
 

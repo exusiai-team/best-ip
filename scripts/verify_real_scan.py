@@ -139,6 +139,21 @@ def _node_ipure_score_valid(record: dict[str, Any], ipure: dict[str, Any]) -> bo
     return True
 
 
+def _asked_via(request: dict[str, Any], evidence: dict[str, Any]) -> bool:
+    """Asked through this node's proxy — or, for an answer reused within the job
+    (`shared:true`, see sources/ip_cache.py), through another node's workspace proxy."""
+
+    if request.get("proxy_url") == evidence.get("proxy_url"):
+        return True
+    if request.get("shared") is not True:
+        return False
+    try:
+        parsed = urlsplit(str(request.get("proxy_url") or ""))
+        return parsed.scheme == "http" and parsed.hostname == "127.0.0.1" and bool(parsed.port)
+    except ValueError:
+        return False
+
+
 def _node_exit_ip_valid(
     record: dict[str, Any], requests: dict[str, Any], evidence: dict[str, Any]
 ) -> bool:
@@ -198,7 +213,7 @@ def _node_ipqs_valid(record: dict[str, Any], ipqs: Any, evidence: dict[str, Any]
         and isinstance(direct, bool)
         and ipqs.get("via_mihomo") is (not direct)
         and evidence.get("ipqs_via_direct_fallback") is direct
-        and ipqs.get("proxy_url") == evidence.get("proxy_url")
+        and _asked_via(ipqs, evidence)
         and ipqs.get("target_host") == IPQS_HOST
         and ipqs.get("url") == ipqs_url(record["exit_ip"])
         and all(record.get(key) == value for key, value in ipqs_fields(ipqs).items())
@@ -542,7 +557,7 @@ async def verify() -> None:
                     lookup.get("ok") is True
                     and (
                         lookup.get("via_mihomo") is not True
-                        or lookup.get("proxy_url") != evidence.get("proxy_url")
+                        or not _asked_via(lookup, evidence)
                         or not isinstance(lookup_data, dict)
                         or not _is_same_ip(lookup_data.get("ip"), exit_ip)
                     )
@@ -555,7 +570,7 @@ async def verify() -> None:
                     or not isinstance(ipure_direct, bool)
                     or ipure.get("via_mihomo") is not (not ipure_direct)
                     or evidence.get("ipure_via_direct_fallback") is not ipure_direct
-                    or ipure.get("proxy_url") != evidence.get("proxy_url")
+                    or not _asked_via(ipure, evidence)
                     or ipure.get("target_host") != IPURE_HOST
                     or ipure.get("url") != _ipure_url(exit_ip)
                 ):
@@ -711,6 +726,17 @@ async def verify() -> None:
                 for key, label in groups.items()
             )
             + f"（共 {len(scorable)} 个有出口 IP 的节点）"
+        )
+        shared = sum(
+            1
+            for record in scorable
+            for request in record["requests"].values()
+            if isinstance(request, dict) and request.get("shared") is True
+        )
+        unique_ips = len({record["exit_ip"] for record in scorable})
+        print(
+            f"出口 IP 去重：{len(scorable)} 个节点 {unique_ips} 个不同出口，"
+            f"复用 {shared} 次按 IP 查询"
         )
         exit_sources = [record["proxy_evidence"].get("exit_ip_source") for record in scorable]
         print(

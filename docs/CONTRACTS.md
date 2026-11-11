@@ -99,7 +99,11 @@ two-hour token bound to request ID and dispatch time. Mutations are same-origin.
   node in subscription order, `{n,t,s,a,ms,r}` — display name, protocol type, state
   `wait|retry|start|connect|lookup|success|partial|failed`, highest attempt started,
   elapsed ms (whole node, retries included; for an active node up to the report),
-  whitelisted reason or null.
+  whitelisted reason or null. `rows` (or null) is the table preview: one entry per node
+  already final as success/partial, shaped like a node record restricted to the fields
+  the table renders (see POST `/api/scan-progress`). The page draws them labelled
+  「扫描中预览 · 未经校验」 and replaces the whole table with the verified artifact; this is
+  the same data `/api/scans/latest` already hands to any session, so no scan token.
 - GET `/api/scans/latest`: session only, no scan token. Picks the newest completed run
   (up to five probes back) whose artifact still exists and returns
   `{request_id,status,run,artifact_ready,artifact_id,artifact_name,artifact_url,scanned_at,active}`;
@@ -158,19 +162,30 @@ two-hour token bound to request ID and dispatch time. Mutations are same-origin.
 - POST `/api/scan-progress`: server-to-server progress report from the scan runner,
   outside the password session like the relay and authenticated by the same runner
   token; the report's `request_id`, `run_id` and `run_attempt` must equal the identity
-  bound at claim time (403 `run_identity_mismatch`). Body (≤ 256 KiB)
-  `{request_id,run_id,run_attempt,phase,total,completed,success,partial,failed,nodes?}`;
+  bound at claim time (403 `run_identity_mismatch`). Body (≤ 1 MiB)
+  `{request_id,run_id,run_attempt,phase,total,completed,success,partial,failed,nodes?,rows?}`;
   every count is an integer 0..100000, `completed ≤ total` and
   `success+partial+failed = completed`. `nodes`, when present, has exactly `total`
   entries (≤ 1000) of `{n,t,s,a,ms,r}`: `n` 1..80 chars without control characters,
   `t` `[a-z0-9-]{0,24}`, `s` one of the eight states, `a` 0..10, `ms` 0..3600000,
   `r` null or 1..60 chars; the number of `success`/`partial`/`failed` entries must equal
-  the three counts. Anything else is 400 `invalid_request`. Accepted reports
+  the three counts. `rows`, only with `nodes` and only for subscriptions of ≤ 300 nodes, is
+  a list of preview rows (each ≤ 2 KiB JSON) with keys from `node_index, node, type, status,
+  exit_ip, country, country_code, region, city, rdns, isp, as_org, asn, network_source,
+  usage_type, is_residential, is_datacenter, is_native, native_status, coffee_score,
+  ipqs_score, ipqs_grade, ipqs_report_url, ipx_score, ipx_grade, ipx_report_url, score,
+  ipure_scores, requests` (`requests` only as `{ipure:{error_type}}`); text ≤ 200 chars
+  without control characters, URLs `https://`, integers -1..2^32-1, booleans, flat maps.
+  Every row must belong to a node whose state is success/partial and equal its `status`,
+  with no duplicate `node_index`. Invalid rows drop the whole `rows` list (stored as null)
+  but keep the reading. Anything else is 400 `invalid_request`. Accepted reports
   return 204 and land in the `SCAN_PROGRESS` Durable Object (one instance per request ID,
   latest report only, purged six hours after the first write); a report for the same run
   that would move the phase backwards or lower `completed` is ignored. Missing binding is
-  503 `worker_not_configured`. Reports never contain exit IPs, scores or subscription
-  content: a node name that contains any subscription URL/credential value (the
+  503 `worker_not_configured`. Reports never contain subscription content or raw request
+  evidence; exit IPs and scores appear only in `rows`, built from the same final record
+  that later goes into the artifact. A preview row containing any subscription
+  URL/credential value is not sent, and a node name that contains any subscription URL/credential value (the
   artifact's own forbidden set) is replaced by `节点 N`, and `r` is one of the fixed
   category messages (`backend/app/scan/errors.py` `live_reason` / `live_record_reason`).
   The runner reports roughly every 0.75 s when any node changes state (heartbeat 5 s),
@@ -229,6 +244,13 @@ hosting · education · government · unknown) → `usage_type` (unknown and off
 become null) + `is_residential` (true only for residential); `nativeType` (native ·
 broadcast · unknown) → `native_type` + `is_native` (true / false / null).
 Anything missing or mistyped is null.
+By-IP requests whose answer does not depend on the asking node (lookup, global ping,
+portscan, pingcheck, IPure, 1ms IPQS — `shareable` in `backend/app/sources/registry.py`)
+are asked once per exit IP within a job and reused by other nodes on the same exit:
+the reused copy carries `shared:true` and keeps the `proxy_url` of the node that actually
+asked (another loopback workspace proxy). Only successful answers are reused; a failed
+or cancelled owner hands the request back to the waiting nodes. trace, who and ipx
+`/json` describe the caller and are never shared.
 Network identity is ipx-first. The exit IP comes from the proxied Coffee trace; when the
 trace names none (Coffee unreachable or rate-limited) it falls back to the proxied echo of
 ipx `/json`, then 1ms who — both describe the connection itself.

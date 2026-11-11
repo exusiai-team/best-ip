@@ -5,10 +5,13 @@ GitHub 在 job 结束前读不到日志，页面在扫描期间只能看到步�
 与一句原因）和总计数报给 Worker，页面轮询时取回、逐个节点画出来。
 
 三条硬约束：
-- 只报过程，不报结果。每个节点只有名字、协议类型、阶段、第几次尝试、用时和一句**白名单**原因
-  （`errors.live_reason`）；出口 IP、评分、订阅内容一律不出 runner——它们只在终态 artifact 里，
-  而 artifact 要经过脱敏与逐字节校验。节点名里只要含有订阅地址或凭证里的值（与产物同一套
+- 逐节点读数只报过程：名字、协议类型、阶段、第几次尝试、用时和一句**白名单**原因
+  （`errors.live_reason`）。节点名里只要含有订阅地址或凭证里的值（与产物同一套
   `contains_forbidden_value` 判据），就换成「节点 N」；
+- 节点落定为完整 / 部分后，另附一行表格预览（`rows`，见 `preview_row`）：只有表格要画的那些
+  字段，没有原始请求证据。页面先把它画进表格（标明「未校验」），终态 artifact 经脱敏与逐字节
+  校验后整表替换。整行里只要出现订阅里的敏感值就不发这一行。订阅超过 `MAX_ROW_NODES` 个节点
+  时不发预览（一条报告会太大），只报读数；
 - 尽力而为。任何失败（网络、4xx/5xx、超时）只记一笔，绝不抛出、绝不拖住扫描；
 - 报告的身份是 request_id + run_id + run_attempt，Worker 只把与当前运行对得上的那条交给页面。
 """
@@ -36,6 +39,16 @@ _REQUEST_TIMEOUT_SECONDS = 4.0
 _PHASES = ("subscription", "scanning", "packaging", "done")
 # 与 worker/progress.js 同一份上限：超过就只报计数（几百个节点的订阅照样有进度条）。
 MAX_REPORT_NODES = 1000
+# 带表格预览的节点上限：每行约 0.7KB，300 行约 200KB，远低于 Worker 的单条报告上限。
+MAX_ROW_NODES = 300
+# 表格预览带的字段：frontend-next/app/records.js 的 toRow 读的那些顶层键，与 worker/progress.js
+# 的 ROW_FIELDS 同一份。请求证据（扣分明细等）不进预览，只在 artifact 里。
+ROW_FIELDS = (
+    "node_index", "node", "type", "status", "exit_ip", "country", "country_code", "region",
+    "city", "rdns", "isp", "as_org", "asn", "network_source", "usage_type", "is_residential",
+    "is_datacenter", "is_native", "native_status", "coffee_score", "ipqs_score", "ipqs_grade",
+    "ipqs_report_url", "ipx_score", "ipx_grade", "ipx_report_url", "score", "ipure_scores",
+)
 _NAME_CHARS = 64
 _LIVE_STATES = {"wait", "retry", "start", "connect", "lookup", "success", "partial", "failed"}
 _TYPE_RE = re.compile(r"[a-z0-9-]{1,24}")
@@ -99,6 +112,37 @@ def live_nodes(nodes: list[dict[str, Any]] | None, redact: set[str]) -> list[dic
     return wire
 
 
+def preview_row(record: dict[str, Any]) -> dict[str, Any] | None:
+    """一条终态记录 → 表格预览行；失败节点没有可画的结果，返回 None。"""
+
+    if record.get("status") not in {"success", "partial"}:
+        return None
+    row = {key: record.get(key) for key in ROW_FIELDS}
+    ipure = (record.get("requests") or {}).get("ipure")
+    error_type = ipure.get("error_type") if isinstance(ipure, dict) else None
+    # 页面据此写「IPure 未收录该 IP」（records.js 的 scoreNoteOf）。
+    if isinstance(error_type, str):
+        row["requests"] = {"ipure": {"error_type": error_type}}
+    return row
+
+
+def live_rows(nodes: list[dict[str, Any]] | None, redact: set[str]) -> list[dict[str, Any]] | None:
+    """节点快照里已经落定的预览行；节点名与逐节点读数同样脱敏，整行含敏感值就不发。"""
+
+    if not nodes or len(nodes) > MAX_ROW_NODES:
+        return None
+    rows = []
+    for index, node in enumerate(nodes):
+        row = node.get("row")
+        if not isinstance(row, dict) or row.get("node_index") != index:
+            continue
+        row = {**row, "node": display_name(row.get("node"), index, redact)}
+        if contains_forbidden_value(row, redact):
+            continue
+        rows.append(row)
+    return rows
+
+
 def phase_of(job: dict[str, Any] | None) -> str:
     status = (job or {}).get("status")
     if status == "running":
@@ -151,6 +195,7 @@ class ProgressReporter:
         phase: str,
         counts: dict[str, int] | None = None,
         nodes: list[dict[str, Any]] | None = None,
+        rows: list[dict[str, Any]] | None = None,
     ) -> bool:
         if phase not in _PHASES or self._client is None:
             return False
@@ -159,6 +204,8 @@ class ProgressReporter:
         # 节点列表必须与计数对得上（Worker 会核对）：数量等于总数，才一起发。
         if nodes is not None and len(nodes) == counts["total"]:
             payload["nodes"] = nodes
+            if rows:
+                payload["rows"] = rows
         try:
             response = await self._client.post(
                 self.url,
@@ -189,13 +236,15 @@ class ProgressReporter:
             job = read_job()
             phase = phase_of(job)
             counts = job_counts(job)
-            nodes = live_nodes(read_nodes() if read_nodes else None, redact)
-            # 「有没有变化」不看用时（它每一刻都在变）：只看阶段、尝试与原因。
+            snapshot_nodes = read_nodes() if read_nodes else None
+            nodes = live_nodes(snapshot_nodes, redact)
+            rows = live_rows(snapshot_nodes, redact)
+            # 「有没有变化」不看用时（它每一刻都在变）：只看阶段、尝试与原因（预览行跟着终态走）。
             shape = tuple((node["s"], node["a"], node["r"]) for node in nodes or [])
             snapshot = (phase, *counts.values(), shape)
             now = loop.time()
             if snapshot != self._last or now - last_sent_at >= _HEARTBEAT_SECONDS:
-                if await self.report(phase, counts, nodes):
+                if await self.report(phase, counts, nodes, rows):
                     self._last = snapshot
                 last_sent_at = loop.time()
             await asyncio.sleep(_REPORT_INTERVAL_SECONDS)

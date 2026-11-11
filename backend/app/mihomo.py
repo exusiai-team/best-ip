@@ -14,7 +14,7 @@ from urllib.parse import quote
 import httpx
 import yaml
 
-from .sources.http import COFFEE_HOST, IPQS_HOST, IPURE_HOST, IPX_HOST, WHO_HOST
+from .sources.registry import PROXIED_HOSTS
 
 MIHOMO_NOT_READY_MESSAGE = (
     "Mihomo 核心未就绪，请运行 uv run python scripts/download_mihomo.py"
@@ -274,11 +274,8 @@ class MihomoProcess:
             "proxies": [{"ip-version": "ipv4-prefer", **proxy} for proxy in self.proxies],
             "proxy-groups": proxy_groups,
             "rules": [
-                f"DOMAIN,{COFFEE_HOST},{self.group_name}",
-                f"DOMAIN,{IPURE_HOST},{self.group_name}",
-                f"DOMAIN,{IPQS_HOST},{self.group_name}",
-                f"DOMAIN,{WHO_HOST},{self.group_name}",
-                f"DOMAIN,{IPX_HOST},{self.group_name}",
+                # 数据源的主机从注册表派生，新增来源不会漏进 MATCH,REJECT。
+                *(f"DOMAIN,{host},{self.group_name}" for host in PROXIED_HOSTS),
                 f"DOMAIN,chatgpt.com,{self.group_name}",
                 f"DOMAIN,api.openai.com,{self.group_name}",
                 "MATCH,REJECT",

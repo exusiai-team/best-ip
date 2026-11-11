@@ -13,6 +13,7 @@ from ..mihomo import (
     MihomoStopError,
 )
 from ..results.store import ResultStoreError
+from ..sources.registry import CHECK_LABELS
 from ..subscription import SubscriptionError
 
 
@@ -218,15 +219,7 @@ _LIVE_REASON_PATTERNS = (
     re.compile(r"节点采集失败（[A-Za-z]{1,40}）"),
 )
 # completeness.partial_reasons 的键 → 「部分」节点缺了哪几项（旧记录退回 unrecorded_requests）。
-_LIVE_MISSING = {
-    "ipx_recorded": "ipx 健康分",
-    "lookup_received": "Coffee 评分",
-    "ipqs_recorded": "1ms 评分",
-    "ipure_recorded": "IPure 评分",
-    "global_ping_recorded": "全球 Ping",
-    "port_scan_recorded": "端口扫描",
-    "ping_check_recorded": "连通检测",
-}
+_LIVE_MISSING = CHECK_LABELS
 
 
 def live_reason(text: object) -> str:

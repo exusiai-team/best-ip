@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import ipaddress
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
@@ -32,29 +33,31 @@ from .gpt_checks import _gpt_check_summary
 from .http import (
     COFFEE_ORIGIN,
     COFFEE_TRACE_URL,
-    IPQS_HOST,
     IPQS_TIMEOUT_SECONDS,
-    IPURE_HOST,
     IPURE_ORIGIN,
     IPURE_TIMEOUT_SECONDS,
-    IPX_HOST,
     IPX_ORIGIN,
     IPX_SELF_URL,
     IPX_TIMEOUT_SECONDS,
-    WHO_HOST,
     WHO_ME_URL,
     WHO_TIMEOUT_SECONDS,
     ProxyTransport,
 )
+from .ip_cache import IpCache
 from .ipure import IPURE_NOT_INDEXED, _ipure_field, _ipure_scores, _ipure_url
+from .registry import ENRICHMENT_HOSTS, SCORE_SOURCES, SOURCE_BY_NAME, SOURCES
 from .values import _clean_text
 
 
 class CoffeeCollector:
     """Coordinate dependent source requests and assemble record schema v1."""
 
-    def __init__(self, proxy_url: str, *, timeout_ms: int) -> None:
+    def __init__(
+        self, proxy_url: str, *, timeout_ms: int, ip_cache: IpCache | None = None
+    ) -> None:
         self.transport = ProxyTransport(proxy_url, timeout_ms=timeout_ms)
+        # 同一任务内各节点共用：同一出口 IP 的按 IP 查询只问一次（见 ip_cache.py）。
+        self.ip_cache = ip_cache
 
     async def collect(
         self,
@@ -316,8 +319,25 @@ class CoffeeCollector:
             ),
             "ipx": ipx_report(),
         }
+        def shared(name: str, coroutine: Coroutine[Any, Any, dict[str, Any]]) -> Any:
+            if self.ip_cache is None or not SOURCE_BY_NAME[name].shareable:
+                return coroutine
+            cache = self.ip_cache
+
+            async def fetch() -> dict[str, Any]:
+                try:
+                    return await cache.fetch(name, ip, lambda: coroutine)
+                finally:
+                    # 复用了别人的答案时这个协程从没跑过：关掉它，免得留下「从未 await」的告警。
+                    if inspect.getcoroutinestate(coroutine) == inspect.CORO_CREATED:
+                        coroutine.close()
+
+            return fetch()
+
         return _IpStage(
-            ip, source, {name: asyncio.create_task(c) for name, c in coroutines.items()}
+            ip,
+            source,
+            {name: asyncio.create_task(shared(name, c)) for name, c in coroutines.items()},
         )
 
 
@@ -529,16 +549,6 @@ def _describe_native(
     )
 
 
-# 页面上各占一列的分数来源：缺了才让节点降为「部分」。key 是 completeness.checks 里的名字。
-# who、全球 Ping、端口、连通检测只作证据（身份已由 ipx 优先给出），缺了不影响状态。
-_SCORE_CHECKS = {
-    "ipx": "ipx_recorded",
-    "lookup": "lookup_received",
-    "ipqs": "ipqs_recorded",
-    "ipure": "ipure_recorded",
-}
-
-
 def _node_status(exit_ip: str, completeness: dict[str, Any]) -> str:
     """没有出口 IP 才算失败；有出口 IP 而缺了某个分数来源，算部分。"""
 
@@ -557,25 +567,24 @@ def _completeness(
         "exit_ip_valid": bool(exit_ip),
         "lookup_received": bool(requests["lookup"].get("ok")),
         "lookup_matches_exit_ip": bool(exit_ip and _is_same_ip(lookup_data.get("ip"), exit_ip)),
-        "global_ping_recorded": _request_recorded(requests["global_ping"]),
-        "port_scan_recorded": _request_recorded(requests["port_scan"]),
-        "ping_check_recorded": _request_recorded(requests["ping_check"]),
-        "ipure_recorded": _request_recorded(requests["ipure"]),
-        "ipqs_recorded": _request_recorded(requests["ipqs"]),
-        "ipx_recorded": _request_recorded(requests["ipx"]),
-        "who_recorded": _request_recorded(requests["who"]),
+        **{
+            source.check: _request_recorded(requests[source.name])
+            for source in SOURCES
+            if source.check.endswith("_recorded")
+        },
     }
     missing = [] if checks["exit_ip_valid"] else ["exit_ip_valid"]
     unrecorded = [
         name for name, value in checks.items() if name.endswith("_recorded") and not value
     ]
+    # 页面上各占一列的分数来源缺了才算「部分」；who、ping、端口、连通检测只作证据。
     # IPure 明确答复「没收录这个 IP」是上游对这个地址的结论，不是采集缺口。
     partial_reasons = [
-        check
-        for name, check in _SCORE_CHECKS.items()
+        source.check
+        for source in SCORE_SOURCES
         if exit_ip
-        and not checks[check]
-        and requests[name].get("error_type") != IPURE_NOT_INDEXED
+        and not checks[source.check]
+        and requests[source.name].get("error_type") != IPURE_NOT_INDEXED
     ]
     return {
         "complete": not missing and not unrecorded and checks["lookup_received"],
@@ -592,15 +601,12 @@ def _request_recorded(result: dict[str, Any]) -> bool:
     )
 
 
-_ENRICHMENT_HOSTS = frozenset({IPURE_HOST, IPQS_HOST, IPX_HOST, WHO_HOST})
-
-
 def _combined_error(*results: dict[str, Any]) -> str | None:
     errors = [
         result.get("error")
         for result in results
         if result.get("error")
-        and (not result.get("skipped") or result.get("target_host") in _ENRICHMENT_HOSTS)
+        and (not result.get("skipped") or result.get("target_host") in ENRICHMENT_HOSTS)
     ]
     return "；".join(dict.fromkeys(errors)) or None
 
