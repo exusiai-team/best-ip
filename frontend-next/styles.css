@@ -601,10 +601,10 @@ code { font-family: var(--font-mono); }
 
 .grid {
   width: 100%;
-  /* 1386px = colgroup 各列宽之和（render.js 的 COLUMNS）。低于这个数浏览器就开始挖列宽，
+  /* 1478px = colgroup 各列宽之和（render.js 的 COLUMNS）。低于这个数浏览器就开始挖列宽，
      表头的列名 + 排序箭头会被挤到折行。所以窄屏宁可横向滚动，也不压缩列宽；
-     1440 视口可用 1392px。加 1ms 列（72px）时节点列从 260 收到 240 腾出位置。 */
-  min-width: 1386px;
+     1440 视口可用 1392px，加了 ipx 列（64px）后已超出，窄于约 1530px 的视口会横向滚动。 */
+  min-width: 1478px;
   border-collapse: separate;
   border-spacing: 0;
   font-variant-numeric: tabular-nums;
@@ -890,11 +890,22 @@ select.filter-input {
   font-variant-numeric: tabular-nums;
 }
 /* 表头统一大写，但「1ms」是站名，大写成「1MS」读不出来。 */
-.grid thead th.col-ipqs { text-transform: none; }
+.grid thead th.col-ipqs,
+.grid thead th.col-ipx { text-transform: none; }
 .score .grade { margin-left: 2px; font-size: 9.5px; font-weight: 800; opacity: 0.75; }
-/* 1ms 评分是出处链接：只加悬停描边，不加下划线，和其余分数药丸长得一样。 */
-a.score { text-decoration: none; cursor: pointer; transition: box-shadow 100ms ease; }
-a.score:hover { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 22%, transparent); }
+/* 分数左边的来源站点图标：点开该站对这个出口 IP 的报告。格子左右内边距收窄，
+   给「图标 + 药丸」腾位置（1ms 列最宽：14 + 3 + 带等级字母的药丸）。 */
+.grid .row > td:is(.cell-ipqs, .cell-ipx, .cell-ipure, .cell-coffee) {
+  padding-left: 4px; padding-right: 4px; white-space: nowrap;
+}
+.src-link {
+  display: inline-flex; vertical-align: middle; margin-right: 3px;
+  border-radius: 4px; opacity: 0.85; transition: opacity 100ms ease, box-shadow 100ms ease;
+}
+a.src-link:hover, a.src-link:focus-visible {
+  opacity: 1; box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink-3) 30%, transparent);
+}
+.src-icon { display: block; width: 14px; height: 14px; border-radius: 3px; }
   /* 四档配色的规则与 .chip-* 合并到上面的「通用药丸」段：两组的 color / background /
      border-color 逐字相同，改一处等于同时改两处。 */
 
@@ -1122,9 +1133,9 @@ a.score:hover { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 22%, trans
   }
   .grid .row > td.ident {
     order: 2;
-    /* 首行由排名、名称和三项总分组成；名称吃掉剩余宽度，网络字段从下一行开始。
+    /* 首行由排名、名称和四项总分组成；名称吃掉剩余宽度，网络字段从下一行开始。
        每个总分按 --score-slot 预留：1ms 的药丸带等级字母，比 --score-width 宽。 */
-    flex: 1 1 calc(100% - var(--rank-width) - 3 * var(--score-slot) - 4 * var(--card-gap));
+    flex: 1 1 calc(100% - var(--rank-width) - 4 * var(--score-slot) - 5 * var(--card-gap));
     display: block;
     max-width: none;
     padding: 0;
@@ -1140,25 +1151,30 @@ a.score:hover { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 22%, trans
   }
   .grid .row > td.ident .ident-sub { white-space: normal; flex-wrap: wrap; }
 
-  /* order 把三个总分提到名字后面（1ms 与 Coffee 同为 order 3，按 DOM 次序 1ms 在前）：DOM 顺序里它们排在最后（导出与快照都按那个顺序），
+  /* order 把四个总分提到名字后面（1ms 与 ipx 同为 order 3，按 DOM 次序 1ms 在前）：DOM 顺序里它们排在最后（导出与快照都按那个顺序），
      这里只改视觉次序——榜单第一眼看的就是分数，不该压在卡片底部。 */
   .grid .row > td.cell-ipqs,
+  .grid .row > td.cell-ipx,
   .grid .row > td.cell-coffee,
   .grid .row > td.cell-ipure {
     flex: 0 0 auto;
     flex-direction: column;
     align-items: center;
     gap: 3px;
+    padding: 0;
   }
-  .grid .row > td.cell-ipqs { order: 3; }
+  .grid .row > td.cell-ipqs,
+  .grid .row > td.cell-ipx { order: 3; }
   .grid .row > td.cell-ipure { order: 4; }
   .grid .row > td.cell-coffee { order: 4; }
   /* 两个分数只差一个数字，卡片里必须标出谁是谁。生成内容只是视觉冗余：
      两个格子的 title 与 data-label 都写着全称。 */
   .grid .row > td.cell-ipqs::before { content: "1ms"; }
+  .grid .row > td.cell-ipx::before { content: "ipx"; }
   .grid .row > td.cell-coffee::before { content: "Coffee"; }
   .grid .row > td.cell-ipure::before { content: "IPure"; }
   .grid .row > td.cell-ipqs::before,
+  .grid .row > td.cell-ipx::before,
   .grid .row > td.cell-coffee::before,
   .grid .row > td.cell-ipure::before {
     font-size: 10px;
@@ -1168,7 +1184,13 @@ a.score:hover { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 22%, trans
     letter-spacing: 0;
     text-transform: none;
   }
+  /* 有来源图标时图标就是标签（竖排在分数上方），文字标签只留给没有出口 IP 的卡片。 */
+  .grid .row > td:is(.cell-ipqs, .cell-ipx, .cell-coffee, .cell-ipure):has(.src-link)::before {
+    content: none;
+  }
+  .grid .row > td:is(.cell-ipqs, .cell-ipx, .cell-coffee, .cell-ipure) .src-link { margin-right: 0; }
   .grid .row > td.cell-ipqs .score,
+  .grid .row > td.cell-ipx .score,
   .grid .row > td.cell-coffee .score,
   .grid .row > td.cell-ipure .score {
     min-width: var(--score-width); height: 25px; padding: 0 5px; font-size: 16px;

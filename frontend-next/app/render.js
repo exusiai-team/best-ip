@@ -20,6 +20,7 @@
 
 import { SCENARIO_LABELS } from "./data.js";
 import { comparableScore, ipureScoreInlineStyle } from "./score-color.js";
+import { SOURCE_SITES } from "./source-icons.js";
 
 const STATUS_LABELS = { success: "完整", partial: "部分", failed: "失败" };
 const SOURCE_LABELS = { who: "1ms who", ipqs: "1ms IPQS", ipure: "IPure", coffee: "Coffee" };
@@ -129,6 +130,12 @@ export const COLUMNS = [
     title: "1ms IPQS 综合评分",
     sortValue: (r) => r.ipqs_score,
     filterValue: (r) => r.ipqs_score,
+  },
+  {
+    key: "ipx", label: "ipx", width: "64px", align: "center", sort: "num", filter: "num",
+    title: "ipx.al 健康分",
+    sortValue: (r) => r.ipx_score,
+    filterValue: (r) => r.ipx_score,
   },
   {
     key: "ipure", label: "IPure", width: "68px", align: "center", sort: "num", filter: "num",
@@ -462,17 +469,40 @@ function gradeBand(grade) {
   return grade ? "bad" : "na";
 }
 
-/** 1ms 评分：分数 + 等级；tooltip 列出扣分项；有报告地址时分数本身就是出处链接（导出时降成 span）。 */
-function ipqsCell(document, result) {
-  const td = cell(document, "ipqs", "cell-ipqs");
+/**
+ * 分数来源的站点图标，点开是该站对这个出口 IP 的报告页。放在分数左边：图标说明分数是谁给的，
+ * 也是去原站核对的入口。没有出口 IP 的行不放（没有可查的地址）；导出时降成不带链接的 span。
+ */
+function sourceLink(document, key, result) {
+  const site = SOURCE_SITES[key];
+  const link = el(document, "a", "src-link");
+  link.href = site.url(result.exit_ip);
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.title = `在 ${site.name} 查看 ${result.exit_ip} 的报告`;
+  link.setAttribute("aria-label", link.title);
+  const icon = el(document, "img", "src-icon");
+  icon.src = site.icon;
+  icon.alt = "";
+  icon.width = 14;
+  icon.height = 14;
+  link.append(icon);
+  return link;
+}
+
+/** 分数格：有出口 IP 时先放来源图标，再放分数药丸。 */
+function scoreCell(document, key, result, pill) {
+  const td = cell(document, key, `cell-${key}`);
   td.dataset.align = "center";
+  if (result.exit_ip) td.append(sourceLink(document, key, result));
+  td.append(pill);
+  return td;
+}
+
+/** 1ms 评分：分数 + 等级；tooltip 列出扣分项。 */
+function ipqsCell(document, result) {
   const score = result.ipqs_score;
-  const pill = el(document, result.ipqs_report_url ? "a" : "span", "score");
-  if (result.ipqs_report_url) {
-    pill.href = result.ipqs_report_url;
-    pill.target = "_blank";
-    pill.rel = "noopener noreferrer";
-  }
+  const pill = el(document, "span", "score");
   if (score === null || score === undefined) {
     pill.dataset.band = "na";
     pill.textContent = "—";
@@ -485,29 +515,47 @@ function ipqsCell(document, result) {
     pill.title = [
       `1ms 综合评分 ${score}${result.ipqs_grade ? ` · ${result.ipqs_grade} 级` : ""}（满分 100，按扣分计）`,
       deductions.length ? `扣分：${deductions.join("，")}` : "无扣分项",
-      result.ipqs_report_url ? "点击打开 1ms 完整报告" : "",
-    ].filter(Boolean).join("\n");
+    ].join("\n");
   }
-  td.append(pill);
-  return td;
+  return scoreCell(document, "ipqs", result, pill);
+}
+
+// ipx.al 的等级是中文词（https://ipx.al/about）：85 极佳 / 70 良好 / 50 一般 / 30 较差 / 其余高风险。
+const IPX_BANDS = { 极佳: "good", 良好: "good", 一般: "warn", 较差: "bad", 高风险: "bad" };
+
+/** ipx 健康分：形状同 1ms；等级是词，只放进 tooltip，格子里只有数字。 */
+function ipxCell(document, result) {
+  const score = result.ipx_score;
+  const pill = el(document, "span", "score");
+  if (score === null || score === undefined) {
+    pill.dataset.band = "na";
+    pill.textContent = "—";
+    pill.title = result.exit_ip ? "ipx.al 未返回健康分" : "未连接成功，无 ipx 健康分";
+  } else {
+    pill.dataset.band = IPX_BANDS[result.ipx_grade] || "na";
+    pill.textContent = String(score);
+    const deductions = (result.ipx_deductions || []).map((item) => `${item.label} −${item.points}`);
+    pill.title = [
+      `ipx 健康分 ${score}${result.ipx_grade ? ` · ${result.ipx_grade}` : ""}`
+        + (result.ipx_ceiling !== null && result.ipx_ceiling !== undefined ? `（类型上限 ${result.ipx_ceiling}）` : ""),
+      deductions.length ? `扣分：${deductions.join("，")}` : "无扣分项",
+    ].join("\n");
+  }
+  return scoreCell(document, "ipx", result, pill);
 }
 
 function coffeeCell(document, result) {
-  const td = cell(document, "coffee", "cell-coffee");
-  td.dataset.align = "center";
-  td.dataset.group = "first";
-  td.append(scorePill(document, {
+  const td = scoreCell(document, "coffee", result, scorePill(document, {
     kind: "coffee",
     value: Number.isFinite(result.coffee_score) ? result.coffee_score : null,
   }));
+  td.dataset.group = "first";
   return td;
 }
 
 function ipureCell(document, result) {
-  const td = cell(document, "ipure", "cell-ipure");
-  td.dataset.align = "center";
-  td.append(scorePill(document, { kind: "ipure", value: ipureTotalOf(result), note: result.score_note }));
-  return td;
+  return scoreCell(document, "ipure", result,
+    scorePill(document, { kind: "ipure", value: ipureTotalOf(result), note: result.score_note }));
 }
 
 /**
@@ -588,7 +636,7 @@ export function createRow(result, { position, tier }, document) {
     row.append(absentCell(document, result));
   }
 
-  row.append(ipqsCell(document, result), ipureCell(document, result));
+  row.append(ipqsCell(document, result), ipxCell(document, result), ipureCell(document, result));
   if (result.exit_ip) SCENARIO_COLUMNS.forEach((column) => row.append(scenarioCell(document, result, column)));
   else row.append(scenarioNoneCell(document, result));
   row.append(coffeeCell(document, result));

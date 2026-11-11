@@ -34,6 +34,7 @@ const STEP_LABELS = [
   ["lookup", "Coffee 查询"],
   ["ipure", "IPure 评分"],
   ["ipqs", "1ms 评分"],
+  ["ipx", "ipx 健康分"],
 ];
 
 /* ------------------------------------------------------------- 值归一化 --- */
@@ -176,6 +177,30 @@ function ipqsOf(record) {
   };
 }
 
+const IPX_GRADES = new Set(["极佳", "良好", "一般", "较差", "高风险"]);
+
+/**
+ * ipx.al 健康分：同 1ms 的形状。扣分项在请求证据的 items 里（含 0 分的提示项），
+ * tooltip 只列真正扣了分的。
+ */
+function ipxOf(record) {
+  const raw = record?.ipx_score;
+  const score = Number.isInteger(raw) && raw >= 0 && raw <= 100 ? raw : null;
+  const data = record?.requests?.ipx?.data;
+  const items = data?.items;
+  return {
+    ipx_score: score,
+    ipx_grade: score !== null && IPX_GRADES.has(record?.ipx_grade) ? record.ipx_grade : null,
+    ipx_report_url: score !== null ? text(record?.ipx_report_url) : null,
+    ipx_ceiling: score !== null && Number.isInteger(data?.ceiling) ? data.ceiling : null,
+    ipx_deductions: Array.isArray(items)
+      ? items
+        .filter((item) => text(item?.label) && Number.isFinite(item?.points) && item.points < 0)
+        .map((item) => ({ label: item.label, points: Math.round(-item.points) }))
+      : [],
+  };
+}
+
 /** 每组取值是谁说的：network_source 只在新产物里有；旧产物一律记为 Coffee（那时只有它）。 */
 function sourcesOf(record) {
   const source = record?.network_source;
@@ -262,6 +287,7 @@ function toRow(record) {
     is_native: triState(record?.is_native),
     coffee_score: failed ? null : integer(record?.coffee_score),
     ...(failed ? ipqsOf(null) : ipqsOf(record)),
+    ...(failed ? ipxOf(null) : ipxOf(record)),
     score,
     // 只有「部分」+ 没分才写明原因：完整却缺分说明上游契约变了，那不该被一句解释掩盖过去。
     score_note: status === "partial" && score === null ? "IPure 未返回纯净度总分" : null,

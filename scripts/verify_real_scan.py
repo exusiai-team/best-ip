@@ -33,7 +33,14 @@ from backend.app.results.artifact import (
 from backend.app.results.store import result_store
 from backend.app.scan.errors import _TRANSPORT_ERROR_TYPES
 from backend.app.sources.coffee import _is_same_ip, _trace_ip
-from backend.app.sources.http import IPQS_HOST, IPURE_HOST, WHO_HOST, WHO_ME_URL
+from backend.app.sources.http import (
+    IPQS_HOST,
+    IPURE_HOST,
+    IPX_HOST,
+    IPX_SELF_URL,
+    WHO_HOST,
+    WHO_ME_URL,
+)
 from backend.app.sources.ipqs import ipqs_fields, ipqs_url
 from backend.app.sources.ipure import (
     IPURE_RESTRICTED_LEVEL,
@@ -41,6 +48,7 @@ from backend.app.sources.ipure import (
     IPURE_SCENARIOS,
     _ipure_url,
 )
+from backend.app.sources.ipx import ipx_fields, ipx_report_url
 from backend.app.subscription import (
     download_subscription,
     is_subscription_metadata,
@@ -128,6 +136,27 @@ def _node_ipure_score_valid(record: dict[str, Any], ipure: dict[str, Any]) -> bo
         if scores.get(scenario_id) != expected:
             return False
     return True
+
+
+def _node_ipx_valid(record: dict[str, Any], ipx: Any, evidence: dict[str, Any]) -> bool:
+    """Every node with an exit IP carries an ipx.al report for that IP, proxied or by IP."""
+
+    if not isinstance(ipx, dict) or not isinstance(ipx.get("data"), dict):
+        return False
+    direct = ipx.get("direct_fallback")
+    return (
+        ipx.get("ok") is True
+        and ipx.get("attempted") is True
+        and isinstance(direct, bool)
+        and ipx.get("via_mihomo") is (not direct)
+        and evidence.get("ipx_via_direct_fallback") is direct
+        and ipx.get("proxy_url") == evidence.get("proxy_url")
+        and ipx.get("target_host") == IPX_HOST
+        and ipx.get("url") == (ipx_report_url(record["exit_ip"]) if direct else IPX_SELF_URL)
+        and _is_same_ip(ipx["data"].get("ip"), record["exit_ip"])
+        and all(record.get(key) == value for key, value in ipx_fields(ipx).items())
+        and record.get("ipx_score") is not None
+    )
 
 
 def _node_ipqs_valid(record: dict[str, Any], ipqs: Any, evidence: dict[str, Any]) -> bool:
@@ -522,6 +551,12 @@ async def verify() -> None:
                     raise RuntimeError(
                         f"节点 {index} 1ms IPQS 证据无效：{reason or '响应缺少最终评分'}"
                     )
+                ipx = requests.get("ipx")
+                if not _node_ipx_valid(record, ipx, evidence):
+                    reason = " ".join(str((ipx or {}).get("error") or "").split())[:200]
+                    raise RuntimeError(
+                        f"节点 {index} ipx.al 证据无效：{reason or '响应缺少健康分'}"
+                    )
                 if not _node_who_valid(record, requests.get("who"), evidence):
                     raise RuntimeError(f"节点 {index} 1ms who 证据无效")
                 completeness = record.get("completeness")
@@ -535,6 +570,7 @@ async def verify() -> None:
                     or checks.get("lookup_matches_trace") is not True
                     or checks.get("ipure_recorded") is not (ipure.get("ok") is True)
                     or checks.get("ipqs_recorded") is not True
+                    or checks.get("ipx_recorded") is not True
                 ):
                     raise RuntimeError(f"节点 {index} 完整性证据无效")
             elif status == "failed":
@@ -629,6 +665,13 @@ async def verify() -> None:
         print(
             f"1ms IPQS 覆盖：{len(scorable)}/{total} 个节点获得评分，"
             f"其中 {via_proxy} 个经节点代理、{len(scorable) - via_proxy} 个走宿主直连兜底"
+        )
+        ipx_via_proxy = sum(
+            1 for record in scorable if record["requests"]["ipx"].get("via_mihomo") is True
+        )
+        print(
+            f"ipx.al 覆盖：{len(scorable)}/{total} 个节点获得健康分，"
+            f"其中 {ipx_via_proxy} 个经节点代理、{len(scorable) - ipx_via_proxy} 个走宿主直连兜底"
         )
         sources = [record.get("network_source") or {} for record in scorable]
         print(
