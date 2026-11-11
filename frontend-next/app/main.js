@@ -486,6 +486,7 @@ function setEmptyState(title, description) {
 const REAL_ORIGIN = {
   gateway: "来自本站 Worker 上最近一次有结果的扫描产物，只存在内存里",
   local: "来自本机 loopback API 上的一次真实扫描导出，只存在内存里",
+  preview: "来自正在进行的扫描逐节点回报的预览行，只存在内存里",
 };
 
 function markRealSource(origin) {
@@ -719,7 +720,7 @@ function applyPreview(progress) {
     generatedAt: "扫描进行中",
     source: `扫描中预览 · 已出 ${mapped.length}/${progress.total} 个节点 · 未经校验，扫描完成后替换为校验过的结果`,
   };
-  markRealSource("gateway");
+  markRealSource("preview");
   setEmptyState(null, "");
   renderStats();
   render();
