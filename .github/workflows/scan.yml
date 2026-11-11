@@ -111,13 +111,16 @@ jobs:
           .venv/bin/python -c 'from backend.app.sources.ipure_config import load_ipure_headers; headers = load_ipure_headers(); assert headers.get("cookie"), "IPure verification cookie is required"'
 
       # 失败不挡扫描（IPv6 节点照旧「网络不可达」）。
+      # 硬上限 25 秒：WARP 只服务少数 IPv6 节点，不能让它拖住整轮扫描（曾经白等 89 秒）。
+      # 超时就照常开扫，IPv6 节点本轮失败；后台脚本若稍后建好，正在跑的扫描也能用上。
       - name: Wait for IPv6 egress
         continue-on-error: true
-        timeout-minutes: 2
         shell: bash
         run: |
-          until [[ -f "$RUNNER_TEMP/warp.status" ]]; do sleep 0.2; done
+          deadline=$((SECONDS + 25))
+          until [[ -f "$RUNNER_TEMP/warp.status" ]] || (( SECONDS >= deadline )); do sleep 0.2; done
           cat "$RUNNER_TEMP/warp.log"
+          [[ -f "$RUNNER_TEMP/warp.status" ]] || { echo "WARP 25 秒内未就绪，先开始扫描"; exit 1; }
           exit "$(cat "$RUNNER_TEMP/warp.status")"
 
       # 这一步也会把扫描进度（计数与每个节点的阶段，不含出口 IP 与评分）回报给 Worker 的
