@@ -1,6 +1,6 @@
 # Best IP
 
-Cloudflare Worker 托管前端与同源 API，通过 GitHub App 调度固定的 GitHub Actions `scan.yml`。Actions runner 使用独立 Mihomo 工作区并发检测订阅节点，生成经过脱敏和完整性校验的短期 artifact；浏览器只在 artifact 完整通过 ZIP、CRC、SHA-256、运行身份、manifest 和节点记录校验后展示结果。
+Cloudflare Worker 托管前端与同源 API，通过一张 fine-grained PAT 调度固定的 GitHub Actions `scan.yml`。Actions runner 使用独立 Mihomo 工作区并发检测订阅节点，生成经过脱敏和完整性校验的短期 artifact；浏览器只在 artifact 完整通过 ZIP、CRC、SHA-256、运行身份、manifest 和节点记录校验后展示结果。
 
 本仓库只支持这一条生产路径：
 
@@ -8,7 +8,7 @@ Cloudflare Worker 托管前端与同源 API，通过 GitHub App 调度固定的 
 浏览器
   └─ 访问密码登录（签名 Cookie）
       └─ Cloudflare Worker + Static Assets
-          └─ GitHub App → GitHub Actions scan.yml
+          └─ GitHub PAT → GitHub Actions scan.yml
               ├─ Mihomo 节点扫描
               └─ sanitized artifact → Worker 换取签名地址 → 浏览器直取字节
 ```
@@ -95,23 +95,22 @@ uv run pytest -q      # 扫描核心、结果校验、CLI 端到端、产物读�
 
 部署不再需要任何 GitHub Actions secret（原来的 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID` 可以删除）。GitHub 上只剩扫描用的 `IPURE_CONFIG_YAML` 一个 secret，见「平台配置」。
 
-Worker 没有第三方运行时 npm 依赖；密码会话和 GitHub App RS256 签名都使用原生 Web Crypto。`package.json` 只保留模块声明、语法检查命令和 Wrangler 部署工具。
+Worker 没有第三方运行时 npm 依赖；密码会话签名使用原生 Web Crypto。`package.json` 只保留模块声明、语法检查命令和 Wrangler 部署工具。
 
 Worker 使用 Static Assets 托管 `frontend-next/`；当前配置不使用 Cloudflare Pages 或 GitHub Pages。实时进度用一个 SQLite 后端的 Durable Object（`wrangler.jsonc` 的 `SCAN_PROGRESS` 绑定与 `v1` 迁移），首次发布时由迁移自动创建，Workers 免费计划可用，不需要在控制台事先建资源；绑定缺失时页面只是退回「只显示步骤」。
 
 ## 平台配置
 
-一共只有 4 项，全都是「换不掉的外部凭据」：
+一共只有 3 项，全都是「换不掉的外部凭据」：
 
 | 位置 | 名称 | 说明 |
 | --- | --- | --- |
 | Worker Secret | `SITE_PASSWORD` | 访问密码，至少 16 个字符（最多 1024），用密码管理器生成 |
-| Worker Secret | `GITHUB_APP_PRIVATE_KEY` | GitHub App 私钥（PEM，PKCS#1 / PKCS#8 都行） |
-| Worker Variable | `GITHUB_APP_ID` | GitHub App 的数字 ID，不是秘密 |
+| Worker Secret | `GITHUB_TOKEN` | fine-grained PAT，只授权 `exusiai-team/best-ip` 的 `Actions: Read and write` |
 | Actions Secret | `IPURE_CONFIG_YAML` | 与本地 `config/ipure.yml` 相同的请求头覆盖内容，必须带 IPure 验证 cookie |
 
-1. 创建 GitHub App，只授予 `Actions: Read and write` 与 `Metadata: Read`，并只安装到 `exusiai-team/best-ip`。installation ID 由 Worker 调 `GET /repos/{owner}/{repo}/installation` 自动查出；仓库换了所有者只需在新所有者下重新安装 App，并改 `worker/config.js` 的 `GITHUB_OWNER`。
-2. 在 Worker 的 Settings → Variables and Secrets 配好上表三项。
+1. 在 GitHub Settings → Developer settings → Fine-grained tokens 新建 token：Resource owner 选 `exusiai-team`（组织需允许 fine-grained token），Repository access 只选 `best-ip`，Repository permissions 只给 `Actions: Read and write`（`Metadata: Read` 自动带上）。到期前换新并更新 Worker Secret；仓库换了所有者要改 `worker/config.js` 的 `GITHUB_OWNER` 并重发 token。
+2. 在 Worker 的 Settings → Variables and Secrets 配好上表两项 Worker Secret。
 3. 在仓库 Settings → Secrets and variables → Actions 配 `IPURE_CONFIG_YAML`。`scan.yml` 要求它非空且带 IPure 验证 cookie，缺失时扫描在准备阶段失败；Actions 扫描前生成该文件，结束时清理，不上传到结果 artifact。可用 `gh secret set IPURE_CONFIG_YAML --repo exusiai-team/best-ip < config/ipure.yml` 同步；修改本地文件不会自动更新 GitHub Secret。
 
 不需要配置的东西，以及为什么：
@@ -119,11 +118,11 @@ Worker 使用 Static Assets 托管 `frontend-next/`；当前配置不使用 Clou
 - **runner ↔ Worker 的共享令牌**：runner 用 GitHub Actions OIDC（`permissions: id-token: write`）向 `POST /api/scan-claim` 证明身份，Worker 用 GitHub 公开的 JWKS 验签，并核对仓库、`main`、`scan.yml`、`workflow_dispatch` 与 audience（Worker 自己的 origin）。领取时 Worker 再发一张只对这次运行有效的随机 runner 令牌（只存 SHA-256），订阅中继与进度回报都凭它。
 - **加密公私钥**：订阅地址不再经过 GitHub，自然不用加密信封。
 - **Worker 地址**：派发 workflow 时由 Worker 作为 `worker_url` 输入传入。
-- **签名密钥**：登录会话与 scan token 的 HMAC 密钥都从 `GITHUB_APP_PRIVATE_KEY` 按用途派生。
+- **签名密钥**：登录会话与 scan token 的 HMAC 密钥都从 `GITHUB_TOKEN` 按用途派生。
 
-以前的 `SCAN_KEY_ID`、`SCAN_TOKEN_SECRET`、`GITHUB_APP_INSTALLATION_ID`、`SUBSCRIPTION_RELAY_TOKEN`（Worker），以及 `SCAN_PRIVATE_KEY_PEM`、`SCAN_RELAY_TOKEN`、`SITE_PASSWORD`、变量 `SCAN_KEY_ID`、`SCAN_RELAY_URL`（Actions）都可以删除。
+以前的 `SCAN_KEY_ID`、`SCAN_TOKEN_SECRET`、`GITHUB_APP_INSTALLATION_ID`、`GITHUB_APP_ID`、`GITHUB_APP_PRIVATE_KEY`、`SUBSCRIPTION_RELAY_TOKEN`（Worker），以及 `SCAN_PRIVATE_KEY_PEM`、`SCAN_RELAY_TOKEN`、`SITE_PASSWORD`、变量 `SCAN_KEY_ID`、`SCAN_RELAY_URL`（Actions）都可以删除。
 
-打开网站后输入访问密码。登录会话有效期 12 小时，保存在 Secure、HttpOnly、SameSite=Strict 的主机专属 Cookie 中；页面提供退出登录入口。修改 `SITE_PASSWORD` 或轮换 `GITHUB_APP_PRIVATE_KEY` 后旧会话失效。退出登录清除当前浏览器 Cookie，其他浏览器的会话不受影响。密码和 App 私钥只放 Worker 运行时 Secrets，不放 Build variables 或仓库。
+打开网站后输入访问密码。登录会话有效期 12 小时，保存在 Secure、HttpOnly、SameSite=Strict 的主机专属 Cookie 中；页面提供退出登录入口。修改 `SITE_PASSWORD` 或轮换 `GITHUB_TOKEN` 后旧会话失效。退出登录清除当前浏览器 Cookie，其他浏览器的会话不受影响。密码和 token 只放 Worker 运行时 Secrets，不放 Build variables 或仓库。
 
 登录接口为 `POST /login`，没有内置分布式尝试次数限制；如需限制在线猜测，可在 Cloudflare 为该路径配置限流规则。缺少登录配置时 Worker 返回 503；扫描配置在调用扫描功能时检查。scan token 有效期两小时，只存在页面内存并通过 `X-Best-IP-Scan-Token` 请求头发送，不进入 URL 或 localStorage。
 

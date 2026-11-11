@@ -14,7 +14,6 @@ export const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
 export const SCAN_TOKEN_TTL_SECONDS = 2 * 60 * 60;
 export const MAX_JOB_PAGES = 10;
 export const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
-export const APP_ID_PATTERN = /^[0-9]+$/u;
 
 export function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -26,9 +25,9 @@ export function positiveInteger(value) {
 }
 
 export function assertWorkerConfigured(env) {
-  // 扫描只需要 GitHub App 的 ID 与私钥：installation 由仓库查出来（worker/github.js），
-  // 签名密钥从私钥派生（worker/auth.js），runner 凭 OIDC 证明身份（worker/oidc.js）。
-  if (!APP_ID_PATTERN.test(String(env.GITHUB_APP_ID || "").trim()) || !String(env.GITHUB_APP_PRIVATE_KEY || "").trim()) {
-    throw new HttpError(503, "请配置 GITHUB_APP_ID 与 GITHUB_APP_PRIVATE_KEY", "worker_not_configured");
+  // 扫描只需要一张 GITHUB_TOKEN（fine-grained PAT）：调 API 用它（worker/github.js），
+  // 签名密钥从它派生（worker/auth.js），runner 凭 OIDC 证明身份（worker/oidc.js）。
+  if (!String(env.GITHUB_TOKEN || "").trim()) {
+    throw new HttpError(503, "请配置 GITHUB_TOKEN", "worker_not_configured");
   }
 }

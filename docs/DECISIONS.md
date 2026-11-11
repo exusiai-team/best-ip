@@ -40,7 +40,8 @@
 - **实时进度：runner 约 0.75 秒报一次 → Worker 的 Durable Object → 页面每秒读一次**。只有计数、阶段和节点名，没有出口 IP 与评分。结果只认终态 artifact。
 - **扫描状态轮询只在「运行中但读不到 runner 进度」时才取 Actions job 明细**（页面拿步骤名兜底推断阶段）。
 - **页面内发起扫描，订阅地址不进 GitHub**：页面把地址交给 Worker，暂存在 Durable Object（15 分钟，领取即删），workflow 输入只有 `request_id` 与 `worker_url`。原先的 RSA-OAEP + AES-GCM 信封要在两边各配一份密钥与指纹，而 Worker 的订阅中继本来就看得到明文，加密只挡住了 GitHub 一侧；现在 GitHub 一侧根本拿不到它。
-- **runner 身份用 GitHub Actions OIDC，不用共享密钥**：Worker 用 GitHub 的 JWKS 验签并核对仓库、`main`、`scan.yml`、`workflow_dispatch` 与 audience；领取时发一张只对这次运行有效的随机 runner 令牌给中继与进度回报用。installation ID 自动查询，HMAC 密钥从 App 私钥派生。整个系统只剩 4 项配置（`SITE_PASSWORD`、`GITHUB_APP_ID`、`GITHUB_APP_PRIVATE_KEY`、Actions 的 `IPURE_CONFIG_YAML`）。
+- **runner 身份用 GitHub Actions OIDC，不用共享密钥**：Worker 用 GitHub 的 JWKS 验签并核对仓库、`main`、`scan.yml`、`workflow_dispatch` 与 audience；领取时发一张只对这次运行有效的随机 runner 令牌给中继与进度回报用。HMAC 密钥从 `GITHUB_TOKEN` 派生。整个系统只剩 3 项配置（`SITE_PASSWORD`、`GITHUB_TOKEN`、Actions 的 `IPURE_CONFIG_YAML`）。
+- **调 GitHub API 改用 fine-grained PAT，不用 GitHub App**（2026-11-11）：App 安装在 2026-11-06 被暂停后，所有扫描只报「无法取得 installation token（HTTP 403）」，看不出原因；App 还要 App ID、私钥两项配置和一跳换 token。PAT 只授权本仓库 `Actions: Read and write`，一项 Secret 就够。代价是 token 挂在个人账号上、会到期，需要定期轮换；轮换同时会让已有会话与 scan token 失效。
 
 ## 前端
 
