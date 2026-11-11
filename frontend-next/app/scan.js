@@ -5,7 +5,7 @@
      1. POST /api/scans 把订阅地址交给本站 Worker（同源 HTTPS）。Worker 只把它暂存在自己的
         Durable Object 里，不放进 GitHub 的 workflow 输入；runner 凭 GitHub Actions OIDC 领一次
         就删（worker/runner.js）；
-     2. Worker 用 GitHub App token 触发 scan.yml（worker/scans.js 的 createScan），
+     2. Worker 用 GitHub token 触发 scan.yml（worker/scans.js 的 createScan），
         回 202 { request_id, scan_token, dispatched_at }；token 走 X-Best-IP-Scan-Token
         头，只存在内存里；
      3. GET /api/scans/<request_id> 轮询执行进度（排队 / 执行中 / 完成 / 失败 / 取消）；
@@ -39,7 +39,7 @@ const CANCEL_DEADLINE_MS = 2 * 60_000;
 
 // 轮询节奏：第一次 1.5 秒，之后每次 ×1.5，上限 4 秒。原先上限是 10 秒：一次实测约 60 秒的扫描，
 // 跑完之后页面最多还要干等 10 秒才发现；进度条也会一跳十几个节点。每轮在 Worker 侧是两三次
-// GitHub API 读（GitHub App 每小时 5000 次额度），4 秒一轮跑满 30 分钟上限也只用掉一成出头。
+// GitHub API 读（PAT 每小时 5000 次额度），4 秒一轮跑满 30 分钟上限也只用掉一成出头。
 export const SCAN_POLL_FIRST_MS = 1_500;
 export const SCAN_POLL_MAX_MS = 4_000;
 // 节点检测完（runner 报了 packaging/done）之后，运行再过两三秒就结束：这时改成每秒问一次，

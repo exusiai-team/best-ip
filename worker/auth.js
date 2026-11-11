@@ -45,16 +45,16 @@ export async function hmacKey(secret) {
   return hmacKeyCache.get(normalized);
 }
 
-// 签名密钥不单独配置：从 GitHub App 私钥（Worker 本来就必须有的高熵 secret）按用途派生，
-// 用途标签把扫描 token 与登录会话分开。轮换 App 私钥会让已签出的 token 与会话一起失效。
-function appSecret(env) {
-  const secret = String(env.GITHUB_APP_PRIVATE_KEY || "").trim();
-  if (!secret) throw new HttpError(503, "请配置 GITHUB_APP_PRIVATE_KEY", "worker_not_configured");
+// 签名密钥不单独配置：从 GITHUB_TOKEN（Worker 本来就必须有的高熵 secret）按用途派生，
+// 用途标签把扫描 token 与登录会话分开。轮换 GITHUB_TOKEN 会让已签出的 token 与会话一起失效。
+function workerSecret(env) {
+  const secret = String(env.GITHUB_TOKEN || "").trim();
+  if (!secret) throw new HttpError(503, "请配置 GITHUB_TOKEN", "worker_not_configured");
   return secret;
 }
 
 function scanTokenKey(env) {
-  return hmacKey(JSON.stringify(["best-ip-scan-token-v2", appSecret(env)]));
+  return hmacKey(JSON.stringify(["best-ip-scan-token-v3", workerSecret(env)]));
 }
 
 export async function signScanToken(env, requestId, dispatchedAt) {
@@ -111,15 +111,15 @@ export const SESSION_TTL_SECONDS = 12 * 60 * 60;
 
 export function assertLoginConfigured(env) {
   if (typeof env.SITE_PASSWORD !== "string" || env.SITE_PASSWORD.length < 16 || env.SITE_PASSWORD.length > 1024 ||
-      !String(env.GITHUB_APP_PRIVATE_KEY || "").trim()) {
-    throw new HttpError(503, "请配置至少 16 个字符的 SITE_PASSWORD 和 GITHUB_APP_PRIVATE_KEY", "worker_not_configured");
+      !String(env.GITHUB_TOKEN || "").trim()) {
+    throw new HttpError(503, "请配置至少 16 个字符的 SITE_PASSWORD 和 GITHUB_TOKEN", "worker_not_configured");
   }
 }
 
 async function sessionKey(env) {
   assertLoginConfigured(env);
-  // 与扫描 token 分开派生；改访问密码或轮换 App 私钥都会让已有会话失效。
-  return hmacKey(JSON.stringify(["best-ip-session-v2", appSecret(env), env.SITE_PASSWORD]));
+  // 与扫描 token 分开派生；改访问密码或轮换 GITHUB_TOKEN 都会让已有会话失效。
+  return hmacKey(JSON.stringify(["best-ip-session-v3", workerSecret(env), env.SITE_PASSWORD]));
 }
 
 export async function passwordMatches(env, password) {

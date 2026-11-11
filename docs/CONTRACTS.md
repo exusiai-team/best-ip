@@ -15,7 +15,7 @@ materialize the same records. The documentation IP is deliberately non-productio
   FastAPI `/` is 404. Local CORS allows only configured frontend Origin, methods
   GET/POST/DELETE, headers Accept/Content-Type, and no credentials.
   Windows launcher disables reload; health checks file existence, not process creation.
-- Production: Worker Static Assets + password session -> GitHub App -> fixed
+- Production: Worker Static Assets + password session -> GitHub PAT -> fixed
   `exusiai-team/best-ip`, `main`, `.github/workflows/scan.yml`.
   The workflow claims the subscription with `scripts/claim_subscription.mjs`, then runs
   `scripts/run_scan.py` directly against the shared scan core. No HTTP server or
@@ -60,8 +60,8 @@ shared secret instead of the browser session.
 Login accepts a URL-encoded password form (8192-byte cap), returning a 303 to
 `/` and a 12-hour signed `__Host-best-ip-session` cookie with Secure,
 HttpOnly, SameSite=Strict and Path=/. Wrong passwords return 401. Passwords
-must contain 16–1024 characters. Changing SITE_PASSWORD or rotating GITHUB_APP_PRIVATE_KEY
-invalidates existing sessions (both HMAC keys are derived from the App private key
+must contain 16–1024 characters. Changing SITE_PASSWORD or rotating GITHUB_TOKEN
+invalidates existing sessions (both HMAC keys are derived from GITHUB_TOKEN
 with distinct purpose labels). POST logout clears the current browser cookie.
 Login and logout POSTs require same-origin metadata. Unauthenticated HTML
 navigation redirects to `/login`; API requests return 401. Authentication
@@ -316,7 +316,7 @@ Validation boundaries:
 | Limits | `BEST_IP_SUBSCRIPTION_MAX_BYTES` 5242880; `BEST_IP_MAX_NODES` 500; `BEST_IP_MAX_PARALLEL_JOBS` 2; `BEST_IP_MAX_PARALLEL_NODES` min(16, max(8, CPU count)); `BEST_IP_MAX_NODE_ATTEMPTS` 3; `BEST_IP_NODE_RETRY_BACKOFF_MS` 500; `BEST_IP_PAGE_TIMEOUT_MS` 45000; `BEST_IP_SUBSCRIPTION_TIMEOUT_SECONDS` 30 |
 | Download | `BEST_IP_MIHOMO_TAG`, `BEST_IP_MIHOMO_ARCHIVE_SHA256` optional; default is the latest release verified against the GitHub asset digest (required under Actions); `GITHUB_TOKEN` authenticates the API call |
 | Local verifier | `BEST_IP_TEST_SUBSCRIPTION_URL`; `BEST_IP_API_BASE` http://127.0.0.1:8000; `BEST_IP_REAL_SCAN_TIMEOUT_SECONDS` 1800; `BEST_IP_REQUEST_ID`; `BEST_IP_ALLOW_PARTIAL` opt-in |
-| Worker | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `SITE_PASSWORD`; `ASSETS` and `SCAN_PROGRESS` bindings |
+| Worker | `GITHUB_TOKEN` (fine-grained PAT, Actions read/write on this repo only), `SITE_PASSWORD`; `ASSETS` and `SCAN_PROGRESS` bindings |
 | Actions | secret `IPURE_CONFIG_YAML`; inputs `request_id`, `worker_url`; OIDC via `permissions: id-token: write` (`ACTIONS_ID_TOKEN_REQUEST_URL`/`_TOKEN`); temporary (step-scoped) `REQUEST_ID`, `WORKER_URL`, `BEST_IP_SUBSCRIPTION_RELAY_URL`, `BEST_IP_SUBSCRIPTION_RELAY_TOKEN` (read from `$RUNNER_TEMP/runner-token`, masked); job-level `BEST_IP_PYTHON_DIR`; run identity from `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` |
 | Deployment (Workers Builds) | none configured; guard reads the injected `WORKERS_CI`, `WORKERS_CI_BRANCH` |
 
