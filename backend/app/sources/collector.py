@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any
 from urllib.parse import quote
+
+import httpx
 
 from . import coffee, gpt_checks
 from . import ipqs as ipqs_source
@@ -65,12 +69,30 @@ class CoffeeCollector:
         mihomo_instance: str,
         on_exit_ip: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
-        """on_exit_ip：trace 取到出口 IP、开始查 IP 资料的那一刻回调一次（只给实时进度用）。"""
+        """on_exit_ip：trace 确认出口 IP、开始等 IP 资料的那一刻回调一次（只给实时进度用）。"""
         started_at = _now()
         started = perf_counter()
-        # who 与 ipx /json 问的是连接本身，不需要先知道出口 IP，与 trace 同时发出。
+        # 不需要出口 IP 的请求（页面、trace、who、ipx /json、GPT 探测）在第 0 秒一起发出。
         async with (
             self.transport.client() as client,
+            _background(
+                coffee.request(
+                    self.transport,
+                    client,
+                    COFFEE_PAGE_URL,
+                    payload="html",
+                    timeout_seconds=self.transport.deadline(12),
+                )
+            ) as page_task,
+            _background(
+                coffee.request(
+                    self.transport,
+                    client,
+                    COFFEE_TRACE_URL,
+                    payload="text",
+                    timeout_seconds=self.transport.deadline(8),
+                )
+            ) as trace_task,
             _background(
                 who_source.request(
                     self.transport,
@@ -87,92 +109,16 @@ class CoffeeCollector:
                     timeout_seconds=self.transport.deadline(IPX_TIMEOUT_SECONDS),
                 )
             ) as ipx_task,
+            _background(gpt_checks.requests(self.transport, client)) as gpt_task,
         ):
-            page, trace = await asyncio.gather(
-                coffee.request(
-                    self.transport,
-                    client,
-                    COFFEE_PAGE_URL,
-                    payload="html",
-                    timeout_seconds=self.transport.deadline(12),
-                ),
-                coffee.request(
-                    self.transport,
-                    client,
-                    COFFEE_TRACE_URL,
-                    payload="text",
-                    timeout_seconds=self.transport.deadline(8),
-                ),
-            )
-            exit_ip = _trace_ip(trace.get("data"))
-            if exit_ip and on_exit_ip is not None:
-                on_exit_ip()
+            exit_ip, stage = await self._ip_stage(client, trace_task, who_task, ipx_task)
+            trace = trace_task.result()
             gpt_requests: dict[str, dict[str, Any]] = {}
-
-            lookup_url = (
-                f"{COFFEE_ORIGIN}/api/ip/lookup/{quote(exit_ip, safe='')}" if exit_ip else ""
-            )
-            if exit_ip:
-                gpt_task = asyncio.create_task(gpt_checks.requests(self.transport, client))
-                lookup_task = asyncio.create_task(
-                    coffee.request(
-                        self.transport,
-                        client,
-                        lookup_url,
-                        payload="json",
-                        timeout_seconds=self.transport.deadline(45),
-                    )
-                )
-                optional_tasks = [
-                    asyncio.create_task(
-                        coffee.request(
-                            self.transport,
-                            client,
-                            _global_ping_url(exit_ip),
-                            payload="json",
-                            timeout_seconds=self.transport.deadline(8),
-                        )
-                    ),
-                    asyncio.create_task(
-                        coffee.request(
-                            self.transport,
-                            client,
-                            f"{COFFEE_ORIGIN}/api/ip/portscan/{exit_ip}?probe=0",
-                            payload="json",
-                            timeout_seconds=self.transport.deadline(8),
-                        )
-                    ),
-                    asyncio.create_task(
-                        coffee.request(
-                            self.transport,
-                            client,
-                            f"{COFFEE_ORIGIN}/api/ip/pingcheck/{exit_ip}",
-                            payload="json",
-                            timeout_seconds=self.transport.deadline(8),
-                        )
-                    ),
-                ]
-                ipure_task = asyncio.create_task(
-                    ipure_source.request(
-                        self.transport,
-                        client,
-                        _ipure_url(exit_ip),
-                        timeout_seconds=self.transport.deadline(IPURE_TIMEOUT_SECONDS),
-                    )
-                )
-                ipqs_task = asyncio.create_task(
-                    ipqs_source.request(
-                        self.transport,
-                        client,
-                        ipqs_source.ipqs_url(exit_ip),
-                        timeout_seconds=self.transport.deadline(IPQS_TIMEOUT_SECONDS),
-                    )
-                )
-                all_request_tasks = [
-                    gpt_task, lookup_task, *optional_tasks, ipure_task, ipqs_task
-                ]
+            if stage is not None:
+                if on_exit_ip is not None:
+                    on_exit_ip()
                 try:
-                    lookup = await lookup_task
+                    lookup = await stage.tasks["lookup"]
                     lookup_data = lookup.get("data") if isinstance(lookup.get("data"), dict) else {}
                     if lookup.get("ok") and not _is_same_ip(lookup_data.get("ip"), exit_ip):
                         lookup = {
@@ -184,15 +130,15 @@ class CoffeeCollector:
                     related = await coffee.related_result(
                         self.transport, client, exit_ip, lookup_data
                     )
-                    global_ping, port_scan, ping_check = await asyncio.gather(*optional_tasks)
+                    global_ping = await stage.tasks["global_ping"]
+                    port_scan = await stage.tasks["port_scan"]
+                    ping_check = await stage.tasks["ping_check"]
                     gpt_requests = await gpt_task
-                    ipure = await ipure_task
-                    ipqs = await ipqs_task
+                    ipure = await stage.tasks["ipure"]
+                    ipqs = await stage.tasks["ipqs"]
+                    ipx = await stage.tasks["ipx"]
                 finally:
-                    for task in all_request_tasks:
-                        if not task.done():
-                            task.cancel()
-                    await asyncio.gather(*all_request_tasks, return_exceptions=True)
+                    await stage.cancel()
             else:
                 lookup = _missing_result("", "Coffee trace 未返回出口 IP", skipped=True)
                 lookup_data = {}
@@ -203,12 +149,9 @@ class CoffeeCollector:
                 related = _missing_result("", reason, skipped=True)
                 ipure = _missing_result("", reason, skipped=True)
                 ipqs = _missing_result("", reason, skipped=True)
+                ipx = _missing_result("", reason, skipped=True)
+            page = await page_task
             who = await who_task
-            ipx = (
-                await ipx_source.for_exit_ip(self.transport.proxy_url, await ipx_task, exit_ip)
-                if exit_ip
-                else _missing_result("", "未取得出口 IP", skipped=True)
-            )
 
         status = _node_status(
             page,
@@ -341,6 +284,102 @@ class CoffeeCollector:
             },
         }
 
+    async def _ip_stage(
+        self,
+        client: httpx.AsyncClient,
+        trace_task: asyncio.Task[Any],
+        who_task: asyncio.Task[Any],
+        ipx_task: asyncio.Task[Any],
+    ) -> tuple[str, _IpStage | None]:
+        """等 trace 定出口 IP；期间 who / ipx /json 谁先回显 IP，就先拿它开跑按 IP 查询的请求。
+
+        trace 仍是出口 IP 的唯一判据：它给的 IP 与抢跑用的不一致（多出口节点），抢跑的
+        请求整组作废、按 trace 的 IP 重发；trace 没给出 IP，抢跑的请求同样作废。
+        """
+
+        stage: _IpStage | None = None
+        echo_tasks = (who_task, ipx_task)
+        pending: set[asyncio.Task[Any]] = {trace_task, *echo_tasks}
+        try:
+            while not trace_task.done():
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in echo_tasks:
+                    if stage is None and task in done and (ip := _echoed_ip(task.result())):
+                        stage = self._start_ip_stage(client, ip, ipx_task)
+            exit_ip = _trace_ip(trace_task.result().get("data"))
+            if stage is not None and stage.ip != exit_ip:
+                await stage.cancel()
+                stage = None
+            if exit_ip and stage is None:
+                stage = self._start_ip_stage(client, exit_ip, ipx_task)
+            return exit_ip, stage
+        except BaseException:
+            if stage is not None:
+                await stage.cancel()
+            raise
+
+    def _start_ip_stage(
+        self, client: httpx.AsyncClient, ip: str, ipx_task: asyncio.Task[Any]
+    ) -> _IpStage:
+        async def ipx_report() -> dict[str, Any]:
+            # shield：这一组作废时只取消按 IP 的补查，不能连带取消第 0 秒发出的 ipx /json。
+            proxied = await asyncio.shield(ipx_task)
+            return await ipx_source.for_exit_ip(self.transport.proxy_url, proxied, ip)
+
+        def request(url: str, cap_seconds: float) -> Coroutine[Any, Any, dict[str, Any]]:
+            return coffee.request(
+                self.transport,
+                client,
+                url,
+                payload="json",
+                timeout_seconds=self.transport.deadline(cap_seconds),
+            )
+
+        coroutines = {
+            "lookup": request(f"{COFFEE_ORIGIN}/api/ip/lookup/{quote(ip, safe='')}", 45),
+            "global_ping": request(_global_ping_url(ip), 8),
+            "port_scan": request(f"{COFFEE_ORIGIN}/api/ip/portscan/{ip}?probe=0", 8),
+            "ping_check": request(f"{COFFEE_ORIGIN}/api/ip/pingcheck/{ip}", 8),
+            "ipure": ipure_source.request(
+                self.transport,
+                client,
+                _ipure_url(ip),
+                timeout_seconds=self.transport.deadline(IPURE_TIMEOUT_SECONDS),
+            ),
+            "ipqs": ipqs_source.request(
+                self.transport,
+                client,
+                ipqs_source.ipqs_url(ip),
+                timeout_seconds=self.transport.deadline(IPQS_TIMEOUT_SECONDS),
+            ),
+            "ipx": ipx_report(),
+        }
+        return _IpStage(ip, {name: asyncio.create_task(c) for name, c in coroutines.items()})
+
+
+@dataclass(slots=True)
+class _IpStage:
+    """一组按出口 IP 的请求（lookup / ping / 端口 / IPure / IPQS / ipx 核对），可整组作废。"""
+
+    ip: str
+    tasks: dict[str, asyncio.Task[Any]]
+
+    async def cancel(self) -> None:
+        for task in self.tasks.values():
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+
+
+def _echoed_ip(result: dict[str, Any]) -> str:
+    """who / ipx /json 回显的连接 IP，规范成与 trace 相同的写法；没有就是空串。"""
+
+    data = result.get("data") if result.get("ok") else None
+    try:
+        return str(ipaddress.ip_address(data.get("ip"))) if isinstance(data, dict) else ""
+    except (TypeError, ValueError):
+        return ""
+
 
 @asynccontextmanager
 async def _background(coro: Coroutine[Any, Any, Any]) -> AsyncIterator[asyncio.Task[Any]]:
@@ -370,8 +409,9 @@ def _network_identity(
     服务器名（rdns）：who 的 PTR → 1ms 共识的 host。
     接入与原生性：1ms IPQS 多源共识 → IPure → Coffee（这两组 who 不提供）。
 
-    出口 IP 仍由 Coffee trace 发现（按 IP 查询的来源都要先有地址），who / IPure 回显一致时
-    记为由它确认。每一组各自记来源（network_source），页面与审计都能看出这一格是谁说的。
+    出口 IP 仍以 Coffee trace 为准（who / ipx 先回显时按 IP 查询可以抢跑，不一致即作废重发），
+    who / IPure 回显一致时记为由它确认。每一组各自记来源（network_source），
+    页面与审计都能看出这一格是谁说的。
     """
 
     who = who_data if isinstance(who_data, dict) else {}
