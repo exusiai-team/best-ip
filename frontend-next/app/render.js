@@ -20,7 +20,7 @@
 
 import { SCENARIO_LABELS } from "./data.js";
 import { comparableScore, ipureScoreInlineStyle } from "./score-color.js";
-import { SOURCE_SITES } from "./source-icons.js";
+import { SOURCE_CREDITS } from "./source-icons.js";
 
 const STATUS_LABELS = { success: "完整", partial: "部分", failed: "失败" };
 const SOURCE_LABELS = { who: "1ms who", ipqs: "1ms IPQS", ipure: "IPure", coffee: "Coffee" };
@@ -83,10 +83,12 @@ function joined(...parts) {
 
 // 排序值约定：null = 沉底（不论升降序）；数字直接相减；字符串走 zh-CN 排序规则。
 // 筛选值约定：text 列给一个可检索串；enum 列给那个词；num 列给显示出来的那个数（含 -1）。
+// 长文本列（节点 / IP / 地区 / 服务商）有两档宽度：默认收起（width，超出省略、悬停看全），
+// 展开时（fullWidth，表格 data-long="expanded"）换宽并允许折行。收起是为了把版面让给分数列。
 export const COLUMNS = [
   { key: "rank", label: "#", width: "40px" },
   {
-    key: "ident", label: "节点", width: "240px", sort: "text", filter: "text",
+    key: "ident", label: "节点", width: "200px", fullWidth: "240px", sort: "text", filter: "text",
     placeholder: "名称/协议",
     sortValue: (r) => r.node || null,
     filterValue: (r) => joined(r.node, r.type, STATUS_LABELS[r.status]),
@@ -94,7 +96,7 @@ export const COLUMNS = [
   // 出口 IP 下面一行是服务器名（PTR 反向解析）：机房 IP 的主机名常直接写着云厂商与机房
   // （ec2-…ap-northeast-1.compute.amazonaws.com），比 AS 名更快看出「这是谁的机器」。
   {
-    key: "ip", label: "出口 IP / 服务器", width: "184px", sort: "ip", filter: "text",
+    key: "ip", label: "出口 IP / 服务器", width: "156px", fullWidth: "220px", sort: "ip", filter: "text",
     placeholder: "IP/前缀/主机名",
     sortValue: (r) => r.exit_ip || null,
     filterValue: (r) => joined(r.exit_ip, r.rdns),
@@ -102,13 +104,13 @@ export const COLUMNS = [
   // 国名按国家代码本地化成中文；城市放在次行（与国名相同时不重复）。
   // 地区、国家代码、上游原文国名仍然参与筛选（输入 JP、Japan、Tokyo 都能命中）。
   {
-    key: "geo", label: "国家和地区", width: "112px", sort: "text", filter: "text",
+    key: "geo", label: "国家和地区", width: "90px", fullWidth: "120px", sort: "text", filter: "text",
     placeholder: "国家/城市", suggest: (r) => r.country,
     sortValue: (r) => (r.exit_ip ? r.country : null) || null,
     filterValue: (r) => (r.exit_ip ? joined(r.country, r.country_raw, r.country_code, r.region, r.city) : ""),
   },
   {
-    key: "isp", label: "服务商 / ISP", width: "172px", sort: "text", filter: "text",
+    key: "isp", label: "服务商 / ISP", width: "124px", fullWidth: "200px", sort: "text", filter: "text",
     placeholder: "名称/AS 号", suggest: (r) => r.isp,
     sortValue: (r) => (r.exit_ip ? r.isp : null) || null,
     filterValue: (r) => joined(r.isp, r.as_org, formatAsn(r.asn)),
@@ -125,17 +127,24 @@ export const COLUMNS = [
     sortValue: (r) => ({ 原生: 0, 广播: 1, 未知: 2 })[nativeOf(r)] ?? null,
     filterValue: nativeOf,
   },
+  // 分数区顺序：ipx → Coffee → 1ms → IPure（+ 六项场景）。
+  {
+    key: "ipx", label: "ipx", width: "64px", align: "center", sort: "num", filter: "num",
+    title: "ipx.al 健康分", group: "first",
+    sortValue: (r) => r.ipx_score,
+    filterValue: (r) => r.ipx_score,
+  },
+  {
+    key: "coffee", label: "Coffee", width: "72px", align: "center", sort: "num", filter: "num",
+    title: "Coffee 信任评分",
+    sortValue: (r) => (Number.isFinite(r.coffee_score) ? r.coffee_score : null),
+    filterValue: (r) => (Number.isFinite(r.coffee_score) ? r.coffee_score : null),
+  },
   {
     key: "ipqs", label: "1ms", width: "72px", align: "center", sort: "num", filter: "num",
     title: "1ms IPQS 综合评分",
     sortValue: (r) => r.ipqs_score,
     filterValue: (r) => r.ipqs_score,
-  },
-  {
-    key: "ipx", label: "ipx", width: "64px", align: "center", sort: "num", filter: "num",
-    title: "ipx.al 健康分",
-    sortValue: (r) => r.ipx_score,
-    filterValue: (r) => r.ipx_score,
   },
   {
     key: "ipure", label: "IPure", width: "68px", align: "center", sort: "num", filter: "num",
@@ -151,13 +160,6 @@ export const COLUMNS = [
     sortValue: (r) => comparableScore(scenarioShown(r, scenario) ?? null),
     filterValue: (r) => scenarioShown(r, scenario) ?? null,
   })),
-  // Coffee 只剩信任评分这一项参考，排在最后；归属信息已不再取自 Coffee。
-  {
-    key: "coffee", label: "Coffee", width: "72px", align: "center", sort: "num", filter: "num",
-    title: "Coffee 信任评分", group: "first",
-    sortValue: (r) => (Number.isFinite(r.coffee_score) ? r.coffee_score : null),
-    filterValue: (r) => (Number.isFinite(r.coffee_score) ? r.coffee_score : null),
-  },
 ];
 
 export const COLUMN_BY_KEY = new Map(COLUMNS.map((column) => [column.key, column]));
@@ -182,6 +184,15 @@ export function createColGroup(document) {
     group.append(col);
   });
   return group;
+}
+
+/** 收起 / 展开长文本列：换 colgroup 宽度，表格的 data-long 交给 CSS 决定省略还是折行。 */
+export function setLongTextExpanded(grid, expanded) {
+  grid.dataset.long = expanded ? "expanded" : "compact";
+  COLUMNS.forEach((column) => {
+    const col = grid.querySelector(`col.col-${column.key}`);
+    if (col && column.fullWidth) col.style.width = expanded ? column.fullWidth : column.width;
+  });
 }
 
 /**
@@ -469,34 +480,28 @@ function gradeBand(grade) {
   return grade ? "bad" : "na";
 }
 
-/**
- * 分数来源的站点图标，点开是该站对这个出口 IP 的报告页。放在分数左边：图标说明分数是谁给的，
- * 也是去原站核对的入口。没有出口 IP 的行不放（没有可查的地址）；导出时降成不带链接的 span。
- */
-function sourceLink(document, key, result) {
-  const site = SOURCE_SITES[key];
-  const link = el(document, "a", "src-link");
-  link.href = site.url(result.exit_ip);
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  link.title = `在 ${site.name} 查看 ${result.exit_ip} 的报告`;
-  link.setAttribute("aria-label", link.title);
-  const icon = el(document, "img", "src-icon");
-  icon.src = site.icon;
-  icon.alt = "";
-  icon.width = 14;
-  icon.height = 14;
-  link.append(icon);
-  return link;
-}
-
-/** 分数格：有出口 IP 时先放来源图标，再放分数药丸。 */
+/** 分数格只放分数药丸；分数出自哪个站，由页面顶部的「数据来源」统一引用。 */
 function scoreCell(document, key, result, pill) {
   const td = cell(document, key, `cell-${key}`);
   td.dataset.align = "center";
-  if (result.exit_ip) td.append(sourceLink(document, key, result));
   td.append(pill);
   return td;
+}
+
+/**
+ * 页面顶部的「数据来源」：逐个引用各站官网（图标 + 站名，悬停说明它提供哪些列）。
+ * 返回 HTML 串而不是节点：线上页与离线快照共用同一份标记；快照约定不含外链，
+ * 所以 withLinks 为 false 时站名降成 span。站名与地址都是 source-icons.js 里的常量。
+ */
+export function sourceCreditsHtml({ withLinks = true } = {}) {
+  const items = SOURCE_CREDITS.map((site) => {
+    const inner = `<img class="credit-icon" src="${site.icon}" alt="" width="14" height="14">${site.name}`;
+    const title = `${site.name}：${site.use}`;
+    return withLinks
+      ? `<a class="credit" href="${site.home}" target="_blank" rel="noopener noreferrer" title="${title}">${inner}</a>`
+      : `<span class="credit" title="${title}">${inner}</span>`;
+  });
+  return `<span class="credits-label">数据来源</span>${items.join("")}`;
 }
 
 /** 1ms 评分：分数 + 等级；tooltip 列出扣分项。 */
@@ -541,16 +546,17 @@ function ipxCell(document, result) {
       deductions.length ? `扣分：${deductions.join("，")}` : "无扣分项",
     ].join("\n");
   }
-  return scoreCell(document, "ipx", result, pill);
+  // ipx 是分数区的第一列：左边画一道分隔线，与前面的归属信息分开。
+  const td = scoreCell(document, "ipx", result, pill);
+  td.dataset.group = "first";
+  return td;
 }
 
 function coffeeCell(document, result) {
-  const td = scoreCell(document, "coffee", result, scorePill(document, {
+  return scoreCell(document, "coffee", result, scorePill(document, {
     kind: "coffee",
     value: Number.isFinite(result.coffee_score) ? result.coffee_score : null,
   }));
-  td.dataset.group = "first";
-  return td;
 }
 
 function ipureCell(document, result) {
@@ -636,10 +642,10 @@ export function createRow(result, { position, tier }, document) {
     row.append(absentCell(document, result));
   }
 
-  row.append(ipqsCell(document, result), ipxCell(document, result), ipureCell(document, result));
+  // 顺序必须与 COLUMNS 一致：ipx → Coffee → 1ms → IPure → 六项场景。
+  row.append(ipxCell(document, result), coffeeCell(document, result), ipqsCell(document, result), ipureCell(document, result));
   if (result.exit_ip) SCENARIO_COLUMNS.forEach((column) => row.append(scenarioCell(document, result, column)));
   else row.append(scenarioNoneCell(document, result));
-  row.append(coffeeCell(document, result));
   return row;
 }
 

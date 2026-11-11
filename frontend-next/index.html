@@ -32,6 +32,8 @@
         </div>
         <p class="run-stats" id="runStats"></p>
       </div>
+      <!-- 数据来源：逐个引用各站官网，由 app/render.js 的 sourceCreditsHtml 填入（快照里同一份、不带链接）。 -->
+      <p class="source-credits" id="sourceCredits"></p>
 
       <!-- 发起扫描：只在在线部署里出现（site-config.js 说 mode === "gateway"）。它默认 hidden，
            由 app/main.js 在确认「本站确实有扫描网关」之后才显出来——
@@ -97,6 +99,7 @@
           <svg aria-hidden="true" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16l-6 7.5V19l-4-2v-4.5z"></path></svg>
           列筛选<span class="filter-count" id="filterCount" hidden></span>
         </button>
+        <button id="longToggle" type="button" class="btn btn-ghost" aria-controls="grid" aria-pressed="false" title="展开或收起节点、出口 IP、服务商等长文本列；收起时超出部分省略，悬停可看全文">展开长文本</button>
         <button id="clearFilters" type="button" class="btn btn-ghost" hidden title="清空搜索、状态与全部列筛选，排序恢复默认">清除筛选</button>
 
         <div class="export-group" role="group" aria-label="导出离线快照">
@@ -117,7 +120,7 @@
          colgroup 宽度与窄屏折叠时每个单元格的 data-label 都由 app/render.js 的 COLUMNS 生成，
          这里不放第二份列定义，免得几处漂移。 -->
     <main class="table-wrap">
-      <table class="grid" id="grid">
+      <table class="grid" id="grid" data-long="compact">
         <caption class="sr-only">节点质量榜：每行一个节点，含评分、出口 IP、归属与原生性</caption>
         <colgroup id="gridColumns"></colgroup>
         <thead id="gridHead"></thead>
