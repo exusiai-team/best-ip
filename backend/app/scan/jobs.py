@@ -20,6 +20,7 @@ from ..mihomo import (
     resolve_outbound_interface,
 )
 from ..results.store import ResultStore, ResultStoreError
+from ..sources.ip_cache import IpCache
 from ..subscription import (
     SubscriptionError,
     download_subscription,
@@ -36,6 +37,7 @@ from .errors import (
 )
 from .models import ScanProgress
 from .node_runner import NodeRunner, _dns_bootstrap_candidates, _remove_work_dir
+from .reporter import preview_row
 
 
 class JobNotFoundError(KeyError):
@@ -83,6 +85,8 @@ class ScanJobManager:
         self._progress_last_write: dict[str, float] = {}
         # 每个节点此刻在做什么（只给实时进度回报用，不落盘、不进产物）。
         self._live: dict[str, list[dict[str, Any]]] = {}
+        # 每个任务一份：同一出口 IP 的按 IP 查询在节点之间只问一次（sources/ip_cache.py）。
+        self._ip_caches: dict[str, IpCache] = {}
         self._semaphore = asyncio.Semaphore(app_settings.max_parallel_jobs)
         self.node_parallelism = app_settings.max_parallel_nodes
 
@@ -277,6 +281,7 @@ class ScanJobManager:
                     "attempt": entry["attempt"],
                     "elapsed_ms": elapsed,
                     "reason": entry["reason"],
+                    "row": entry.get("row"),
                 }
             )
         return snapshot
@@ -378,6 +383,7 @@ class ScanJobManager:
                         finally:
                             node_queue.task_done()
 
+                self._ip_caches[job_id] = IpCache()
                 worker_count = min(self.node_parallelism, len(proxies))
                 failure_phase = "scan"
                 node_tasks = [asyncio.create_task(node_worker()) for _ in range(worker_count)]
@@ -447,6 +453,9 @@ class ScanJobManager:
                 self._errors[job_id] = classify_error(MihomoStopError())
             await self._safe_write_progress(job)
         finally:
+            cache = self._ip_caches.pop(job_id, None)
+            if cache is not None and isinstance(job.get("metrics"), dict):
+                job["metrics"]["shared_ip_requests"] = cache.hits
             if work_dir.exists():
                 job["cleanup_confirmed"] = False
             job["finished_at"] = job.get("finished_at") or _now()
@@ -494,6 +503,7 @@ class ScanJobManager:
                 dns_bootstrap_candidates=dns_bootstrap_candidates,
                 outbound_interface=outbound_interface,
                 on_stage=on_stage,
+                **({"ip_cache": cache} if (cache := self._ip_caches.get(job["id"])) else {}),
             )
             result = outcome.record
             if outcome.error is not None:
@@ -520,6 +530,7 @@ class ScanJobManager:
                 entry["state"] = str(result.get("status") or "failed")
                 entry["elapsed_ms"] = round((perf_counter() - node_started) * 1000)
                 entry["reason"] = live_record_reason(result)
+                entry["row"] = preview_row(result)
             _count_result(job, result)
             job["completed"] += 1
             await self._write_progress(job)

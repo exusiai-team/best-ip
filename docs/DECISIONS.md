@@ -13,7 +13,7 @@
 - **WARP 不装包、在后台建**：`apt-get install wireguard-tools` 的 dpkg 触发器占了这一步 9~16 秒的大头；现在只要 `wg` 一个二进制（随 Python 环境按天缓存，缺了就 `apt-get download` 后解包），用 `ip` + `wg set` 直接起接口、加一条 `::/0` 路由，不用 wg-quick 的策略路由（端点是 IPv4，不会绕回隧道）。runner 实测冷启动 3.9 秒、缓存命中 1.6 秒，且与领取订阅、装 Mihomo 重叠，扫描前一步才等它落定。
 - **按 IP 查询可以抢跑；出口 IP 以 trace 为准，trace 没给出时退回 ipx / who 回显**：trace、who、ipx `/json`、GPT 探测都在第 0 秒发出；trace、who、ipx 谁先给出 IP，lookup / ping / 端口 / IPure / IPQS / ipx 核对就先按它开跑。trace 回来的 IP 不一致（多出口节点）时抢跑的整组取消、按 trace 重发。trace 没给出 IP（Coffee 不通或限流）时用经节点代理的回显（ipx 优先），`proxy_evidence.exit_ip_source` 记下是谁定的——原来 Coffee 一家出故障就让整轮扫描全部失败，而 ipx / who 问的同样是「这条连接的出口」（2026-11-11）。1ms IPQS 在服务端等齐十余个源才给 `done`，稳定约 4.5 秒，是单节点耗时的下限，省下来的就是它前面那段等待。
 - **节点只在找不到出口 IP 时失败；有出口 IP 而缺了页面上某一列分数（ipx / Coffee lookup / 1ms / IPure）才算「部分」**（`completeness.partial_reasons`）。who、全球 Ping、端口、连通检测只作证据，缺了不降级；原来 11 个可选项任一缺失都算部分，「部分」几乎不携带信息。不再请求 Coffee 页面（只用来算标题和 sha256，与 trace 的成功集合 36/36 相同，却是必需项）和关联域名轮询（页面不展示；正式订阅 43 个节点只触发 2 次）。lookup 上限 45 秒 → 10 秒（实测 p90 0.9s、最慢 2.1s）（2026-11-11）。
-- **暂不按出口 IP 去重**：正式订阅 36 个出口里不同 IP 28 个（重复 22%），而同出口的节点多半同时在跑，复用要做跨节点的单飞缓存，且记录里的代理证据会变成「另一个节点代我问的」。省下的是上游请求数而不是墙钟，等 `scan_timing` 的 `unique_exit_ips` 显示重复率明显升高、或上游开始限流再做。
+- **同一任务内按出口 IP 复用按 IP 查询**（`sources/ip_cache.py`）：正式订阅 34 个有出口的节点只有 27 个不同出口，一次扫描复用 41 次请求。单飞：同一 (源, IP) 正在问时后来者等它；只复用成功的答案，先问的节点失败或被取消时等着的节点各自重问，不把别人的连接故障算到自己头上。只用于答案与「从哪个节点问」无关的源（注册表里 `shareable`）；trace / who / ipx `/json` 问的是连接本身，永不复用。复用来的结果带 `shared: true` 并保留真正发出请求的节点代理地址，审计看得出是谁代问的。
 - **双栈节点 `ip-version: ipv4-prefer`**（订阅自己写了的照它的来）：IPv6 出口是隧道，多一跳、出口也变了，只留给只有 IPv6 的节点。
 - **不换 sing-box**：两次正式扫描 274 个节点里只有 1 个是「配置不受支持」（vless XHTTP，原版 sing-box 也不支持），其余失败全是连通性问题；换内核预计多不出节点。
 - **Mihomo 就绪 = 控制端口应答且 selector 组已注册**。控制端口先接客、tunnel 后填充，只看 `/version` 会 404 打掉健康节点。
@@ -30,7 +30,8 @@
 - **ipx 字母等级由前端按分数换算**：ipx API 只给分数和中文词，网页上的「A+ / A / B / C / D」是它页面脚本按 85 / 70 / 50 / 30 门槛现算的，不在 API 里。照抄门槛（`render.js` 的 `ipxLetter`），不进记录、不进校验：它是展示层派生值，门槛变了只改一处。
 - **接入与原生性在 ipx 缺数据时由 1ms IPQS 优先**（1ms → IPure → Coffee），并新增一列 1ms 综合评分。1ms 的 `/api/check` 对十余个源投票，比单一来源的判断稳；只读 NDJSON 末尾的 `done` 事件。网页另有两个只在浏览器里跑的源（ipinfo、ipwho），核对过页面代码：它们只给地理、ASN、主机名，不给类型、匿名标记和风险值，因此 `done.score` 就是网页显示的分数。没有在后端复刻 1ms 的聚合算法：那等于长期追一个别人的私有实现，分数还会悄悄漂移。记录只新增 `ipqs_score` / `ipqs_grade` / `ipqs_report_url`，类型与原生性并入已有的 `usage_type` / `is_native`，不另立平行字段。
 - **新增 ipx.al 健康分，用 `/json` 而不是 `/api/report/{ip}`**：实测各源单次耗时 Coffee trace ≈1.2s、lookup ≈0.6s、who ≈1.4s、1ms IPQS ≈5s、ipx ≈4–8s（2026-11-11，宿主直连）。ipx 是最慢的一个，若排在 trace 之后会把每个节点拉长；`/json` 只认调用方，经节点代理问就是节点出口，于是和 trace、who 一起在第 0 秒发出，耗时被 lookup / IPQS 覆盖。代价是多出口节点可能回报另一个 IP，所以回显不一致时改由宿主按 IP 查（文档相同，只是视角不同，记为直连兜底）。起初只取分数、等级与报告页地址；2026-11-11 起它也是归属信息的首选来源（见上）。
-- **扫描用的 Mihomo 是域名白名单**（未列出的一律 `MATCH,REJECT`）：新增任何经节点访问的数据源都必须把主机加进 `mihomo.py` 的 `rules`。主机常量从 `sources/http.py` import，不另抄一份。漏掉时请求会全部「成功」地走宿主直连兜底，表面看不出来（1ms 首轮真实验收就是 23/23 直连）；所以兜底成功时也会记下 `requests.ipqs.proxy_error`，`verify_real_scan.py` 会打印经代理与走直连的节点数。
+- **数据源注册表 `sources/registry.py` 是唯一登记处**：每个经节点访问的上游登记一次（主机、completeness 检查名、是否按 IP、能否跨节点复用、有没有分数列、是不是富化源），Mihomo 白名单、「部分」判定、实时进度文案、`scan_timing` 逐源统计、出口 IP 复用都从它派生。请求怎么发、怎么解析仍留在各自模块：每家都不一样，塞进一张表只会更难读。
+- **扫描用的 Mihomo 是域名白名单**（未列出的一律 `MATCH,REJECT`）：白名单从注册表的 `PROXIED_HOSTS` 生成，新增来源登记进注册表即可，测试会核对每个登记的主机都在 `rules` 里。漏掉时请求会全部「成功」地走宿主直连兜底，表面看不出来（1ms 首轮真实验收就是 23/23 直连）；所以兜底成功时也会记下 `requests.ipqs.proxy_error`，`verify_real_scan.py` 会打印经代理与走直连的节点数。
 - **IPure 未收录的 IP 记为「未收录」，不算部分**：匿名 `/api/lookup` 对没收录的 IP 返回 `401 invalid_api_key`（要 API Key 才做实时检测），正式订阅 36 个出口里 13 个如此，原来全被记成「部分」。直连同样拿不到，所以不兜底；`requests.ipure.error_type = "NotIndexed"`，页面写「IPure 未收录该 IP」。
 - **色带复刻 ipure.dev 的五段渐变**，锚点按 Coffee 的亮度带重新取色，保证对比度过 AA。
 
@@ -43,7 +44,8 @@
 ## 运行与通路
 
 - **抓订阅：直连优先，Worker 中继只在 `http_status_403` / `direct_timeout` / `direct_unreachable` 时回退**。同一台订阅主机可能只拒 Azure，也可能只拒 Cloudflare，写死任何一侧都会把另一侧打成 403。逐跳公网校验只在 runner 做。
-- **实时进度：runner 约 0.75 秒报一次 → Worker 的 Durable Object → 页面每秒读一次**。只有计数、阶段和节点名，没有出口 IP 与评分。结果只认终态 artifact。
+- **实时进度：runner 约 0.75 秒报一次 → Worker 的 Durable Object → 页面每秒读一次**。逐节点读数只有计数、阶段和节点名。
+- **边扫边出：节点落定为完整 / 部分后，进度里附一行表格预览，页面先画进表格**（2026-11-11）。预览只有表格要画的字段（出口 IP、归属、各列分数），没有请求证据，标明「扫描中预览 · 未经校验」，终态 artifact 逐字节校验后整表替换——结果的事实源仍是 artifact。门与 `/api/scans/latest` 相同（站点会话）：登录后的任何会话本来就能取到最近一次扫描的完整结果，预览不扩大暴露面，所以不另要 scan token；Durable Object 6 小时整体清空，短于 artifact 的 1 天。整行含订阅敏感值就不发；超过 300 个节点不发预览（单条报告会过大）；Worker 校验不过只丢预览、读数照收。
 - **扫描状态轮询只在「运行中但读不到 runner 进度」时才取 Actions job 明细**（页面拿步骤名兜底推断阶段）。
 - **页面内发起扫描，订阅地址不进 GitHub**：页面把地址交给 Worker，暂存在 Durable Object（15 分钟，领取即删），workflow 输入只有 `request_id` 与 `worker_url`。原先的 RSA-OAEP + AES-GCM 信封要在两边各配一份密钥与指纹，而 Worker 的订阅中继本来就看得到明文，加密只挡住了 GitHub 一侧；现在 GitHub 一侧根本拿不到它。
 - **runner 身份用 GitHub Actions OIDC，不用共享密钥**：Worker 用 GitHub 的 JWKS 验签并核对仓库、`main`、`scan.yml`、`workflow_dispatch` 与 audience；领取时发一张只对这次运行有效的随机 runner 令牌给中继与进度回报用。HMAC 密钥从 `GITHUB_TOKEN` 派生。整个系统只剩 3 项配置（`SITE_PASSWORD`、`GITHUB_TOKEN`、Actions 的 `IPURE_CONFIG_YAML`）。

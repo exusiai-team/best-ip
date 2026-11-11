@@ -13,6 +13,7 @@ from ..async_utils import to_thread_uncancelled as _to_thread_uncancelled
 from ..config import Settings
 from ..mihomo import MihomoError, MihomoNotReadyError, MihomoProcess, MihomoStopError
 from ..sources.collector import CoffeeCollector
+from ..sources.ip_cache import IpCache
 from .errors import (
     ScanError,
     _attach_mihomo_error,
@@ -67,6 +68,7 @@ class NodeRunner:
         dns_bootstrap_candidates: list[str],
         outbound_interface: str | None,
         on_stage: StageCallback | None = None,
+        ip_cache: IpCache | None = None,
     ) -> NodeOutcome:
         """检测一个节点：先试一次；失败且值得重试时，余下的尝试**并行**跑，谁先成功用谁。
 
@@ -92,6 +94,7 @@ class NodeRunner:
                 outbound_interface=outbound_interface,
                 phase_ms=phase_ms,
                 on_stage=on_stage,
+                ip_cache=ip_cache,
             )
 
         first = await attempt(1)
@@ -144,6 +147,7 @@ class NodeRunner:
         outbound_interface: str | None,
         phase_ms: dict[str, int],
         on_stage: StageCallback | None,
+        ip_cache: IpCache | None = None,
     ) -> _Attempt:
         """一次尝试：独立的 Mihomo 进程与工作目录，结束时（含被取消）确认清理。"""
 
@@ -196,6 +200,8 @@ class NodeRunner:
             collector = self.collector_factory(
                 mihomo.proxy_url,
                 timeout_ms=self.settings.page_timeout_ms,
+                # 没有缓存时不传：替身采集器不必认识这个参数。
+                **({"ip_cache": ip_cache} if ip_cache is not None else {}),
             )
             if on_stage:
                 on_stage("connect", number, None)

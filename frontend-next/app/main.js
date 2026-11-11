@@ -165,6 +165,9 @@ const dataset = {
   emptyCopy: null,
 };
 
+// 表格预览的状态（见下文 applyPreview）：count 是已画的预览行数，closed 表示校验过的结果已到手。
+const preview = { count: -1, closed: false };
+
 // nodes 与 index 必须同批换：分两次赋值迟早会留下一份对不上号的索引，
 // 表现是「搜索框里输入什么都没结果」。
 function setNodes(nodes) {
@@ -237,6 +240,7 @@ function formatBytes(bytes) {
 // 会改的展示文字，改了这里就会悄悄判反。
 function metaLabel() {
   if (!dataset.meta) return null;
+  if (dataset.meta.preview) return dataset.meta.source;
   const prefix = dataset.meta === SNAPSHOT_META ? "示例生成于" : "真实扫描快照生成于";
   return `${prefix} ${dataset.meta.generatedAt}`;
 }
@@ -512,6 +516,8 @@ function beginRealSource(origin, title, description) {
  * badge 的 title 里要能看出这是「哪一次」扫描。
  */
 function applyRealPayload(payload, origin, emptyTitle, emptyDesc) {
+  // 校验过的结果到手：之后晚到的进度读数不能再拿预览把它顶掉。
+  preview.closed = true;
   setNodes(toRows(payload));
   dataset.meta = toSnapshotMeta(payload);
   markRealSource(origin);
@@ -693,6 +699,32 @@ function finalProgress(nodes = null) {
 // 这一路是锦上添花：读失败就等下一秒，不打扰主轮询，也不进错误提示。
 const feed = { timer: null, key: "", target: null, progress: null, generation: 0 };
 
+// 表格预览：扫描进行中，已落定为完整 / 部分的节点先按 runner 回报的预览行画进表格，
+// 来源标成「扫描中预览 · 未经校验」；artifact 逐字节校验后由 applyRealPayload 整表替换。
+// 预览与 artifact 走同一个 toRows，所以列、排序、筛选都一样，只是缺 tooltip 里的扣分明细。
+
+function applyPreview(progress) {
+  const rows = progress?.rows;
+  if (preview.closed || !Array.isArray(rows) || rows.length === preview.count) return;
+  let mapped;
+  try {
+    mapped = toRows({ results: rows });
+  } catch {
+    return;
+  }
+  preview.count = rows.length;
+  setNodes(mapped);
+  dataset.meta = {
+    preview: true,
+    generatedAt: "扫描进行中",
+    source: `扫描中预览 · 已出 ${mapped.length}/${progress.total} 个节点 · 未经校验，扫描完成后替换为校验过的结果`,
+  };
+  markRealSource("gateway");
+  setEmptyState(null, "");
+  renderStats();
+  render();
+}
+
 function stopFeed() {
   if (feed.timer !== null) clearTimeout(feed.timer);
   feed.timer = null;
@@ -708,6 +740,8 @@ function ensureFeed(target) {
   const key = `${target.id}:${target.runId}:${target.runAttempt}`;
   if (feed.key === key) return;
   stopFeed();
+  preview.count = -1;
+  preview.closed = false;
   feed.key = key;
   feed.target = { id: target.id, runId: target.runId, runAttempt: target.runAttempt };
   scheduleFeed(feed.generation, 0);
@@ -747,6 +781,7 @@ async function feedOnce(generation) {
       if (message) view.message = message;
     }
     showPanel(view);
+    applyPreview(progress);
   }
   // runner 报了 done：每个节点都已落定，不用再问。
   if (progress?.phase === "done") return;

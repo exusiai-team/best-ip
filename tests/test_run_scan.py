@@ -45,7 +45,7 @@ async def test_cli_scan_publishes_verified_artifact(tmp_path, capsys):
     collectors = {name: collector_factory(plan) for name, plan in plans.items()}
 
     class RoutingCollector:
-        def __init__(self, proxy_url, *, timeout_ms):
+        def __init__(self, proxy_url, *, timeout_ms, ip_cache=None):
             self.proxy_url = proxy_url
 
         async def collect(self, *, node_name, **kwargs):

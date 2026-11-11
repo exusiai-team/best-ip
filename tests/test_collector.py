@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from backend.app.sources import collector as collector_module
 from backend.app.sources.collector import CoffeeCollector
+from backend.app.sources.ip_cache import IpCache
 
 TRACE_IP = "203.0.113.7"
 OTHER_IP = "198.51.100.9"
@@ -82,8 +83,8 @@ class _Upstream:
         return _ok(url, data)
 
 
-async def _collect():
-    collector = CoffeeCollector("http://127.0.0.1:7890", timeout_ms=5000)
+async def _collect(ip_cache=None, port=7890):
+    collector = CoffeeCollector(f"http://127.0.0.1:{port}", timeout_ms=5000, ip_cache=ip_cache)
     return await collector.collect(
         job_id="job",
         node_index=0,
@@ -177,3 +178,17 @@ async def test_missing_score_source_makes_the_node_partial(monkeypatch):
     record = await _collect()
     assert record["status"] == "partial"
     assert record["completeness"]["partial_reasons"] == ["ipure_recorded"]
+
+
+async def test_nodes_sharing_an_exit_ip_ask_ip_lookups_once(monkeypatch):
+    upstream = _Upstream(monkeypatch, trace_ip=TRACE_IP, who_ip=TRACE_IP)
+    cache = IpCache()
+    first, second = await asyncio.gather(_collect(cache, 7890), _collect(cache, 7891))
+    # lookup / global ping / portscan / pingcheck / IPure / IPQS：两个节点合起来各一次。
+    assert len(upstream.calls) == 6
+    shared = [
+        name for name in ("lookup", "ipqs", "ipure", "global_ping", "port_scan", "ping_check")
+        if first["requests"][name].get("shared") or second["requests"][name].get("shared")
+    ]
+    assert len(shared) == 6
+    assert first["status"] == second["status"] == "success"

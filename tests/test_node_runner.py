@@ -53,7 +53,7 @@ def collector_factory(plan):
     calls = []
 
     class FakeCollector:
-        def __init__(self, proxy_url, *, timeout_ms):
+        def __init__(self, proxy_url, *, timeout_ms, ip_cache=None):
             pass
 
         async def collect(self, *, job_id, node_index, node_name, **_):

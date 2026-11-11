@@ -62,6 +62,8 @@ Mihomo 默认安装最新 release，并用 GitHub 给出的资产摘要（`diges
 - 每个真实节点恰好产生一条 `success`、`partial` 或 `failed` 记录。失败记录的 `exit_ip` 必须为 JSON `null`。
 - 节点文件原子写入；只有节点集合、字段、状态、出口 IP、代理证据、文件大小和 SHA-256 全部通过后才生成 manifest。
 - 扫描进度画成三段步骤条（启动 → 扫描节点 → 校验结果；提交、排队、准备环境合成「启动」一格），配每秒走的用时。面板主体是**逐节点格子**：每个节点一格，实时显示等待 / 启动代理 / 连接检测站 / 查询 IP 质量 / 重试，用时每秒往上走，终态给完整 / 部分（缺哪几项）/ 失败（白名单原因）。读数来自 runner 约每秒一次的回报（`POST /api/scan-progress`，存在 Worker 的 `SCAN_PROGRESS` Durable Object 里），页面每秒读一次 `GET /api/scans/{id}/progress`（只读 Durable Object，不耗 GitHub API）。格子里没有出口 IP 与评分；读不到回报时进度条退回不定状态，不伪造数字。完成那一刻面板计数改用终态 artifact，格子只在三种终态个数与 artifact 逐一相同时保留——表格与导出仍以校验过的 artifact 为唯一事实源。
+- 边扫边出：节点一落定为完整 / 部分，runner 就在进度回报里附一行表格预览（`rows`），页面立刻把它画进表格，来源标成「扫描中预览 · 未经校验」；扫描完成、artifact 逐字节校验通过后整表替换。预览不带扣分明细等请求证据；订阅超过 300 个节点时不发预览。
+- 同一次扫描里，多个节点落到同一个出口 IP 时，lookup、ping、端口、连通检测、IPure、1ms 只问一次，其余节点复用（记录里带 `shared: true`，保留真正发出请求的节点代理地址）。
 - 刷新页面或换标签页后，若最近一次扫描还在排队/执行，页面会自动跟进它的进度（`/api/scans/latest` 的 `active`），跑完自动换上新结果；跟进只读，不能停止（停止需要发起时内存里的 scan token）。
 - 页面轮询首轮 1.5 秒、每次 ×1.5、上限 4 秒；节点检测完（runner 报了 packaging/done）后改为每秒一次，运行一结束就取结果。`scan.yml` 把单任务节点并发设为 16（托管 runner 默认公式只给 8）。
 - `scan.yml` 的准备段压到三步：校验输入 + 写 IPure 配置 + 凭 OIDC 领取订阅一步完成；uv 管理的 Python 3.13 与 `.venv` 按天缓存，命中时不装 uv、不跑 `uv sync`，直接 `.venv/bin/python`；每天第一次扫描（或 `pyproject.toml` 变化时）重新解析最新依赖并存回缓存。Mihomo 每次取最新 release。

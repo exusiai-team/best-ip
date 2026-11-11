@@ -6,14 +6,32 @@ import { assertRunnerToken, scanStub } from "./runner.js";
 // 由 Worker 交回。为什么要这条通道：GitHub 在 job 结束前读不到日志（实测 404），Actions API 只给得出
 // 步骤名，于是一次几十秒到几分钟的扫描在页面上只有一句「Run production scan」。
 //
-// 它只是**过程中的读数**，不是结果：每个节点只有名字、协议类型、阶段、第几次尝试、用时与一句白名单
-// 原因（backend/app/scan/errors.py 的 live_reason）；出口 IP、评分与订阅内容一律不在这里，表格仍然只认
-// 终态 artifact（逐字节校验之后）。进度写坏了、丢了、Durable Object 不可用，都只会让页面退回「只显示
-// 步骤名」，绝不会让扫描或结果本身失败。
+// 它是**过程中的读数**：每个节点有名字、协议类型、阶段、第几次尝试、用时与一句白名单原因
+// （backend/app/scan/errors.py 的 live_reason）。节点落定为完整 / 部分后另附一行表格预览（rows：
+// 出口 IP、归属、各列分数，见 backend/app/scan/reporter.py 的 preview_row），页面先画出来、标明
+// 「未校验」，终态 artifact 逐字节校验后整表替换。预览与 /api/scans/latest 交出的结果是同一道门
+// （站点会话）、同一份数据，所以不另要 scan token。进度写坏了、丢了、Durable Object 不可用，
+// 都只会让页面退回「只显示步骤名」，绝不会让扫描或结果本身失败。
 export const SCAN_PROGRESS_PATH = "/api/scan-progress";
 
-// 一条报告的上限：1000 个节点 × 每个约 150 字符。超过节点上限时 runner 只报计数。
-const MAX_REPORT_CHARS = 256 * 1024;
+// 一条报告的上限：1000 个节点 × 每个约 150 字符，加 300 行表格预览 × 每行至多 2KB。
+// 超过节点上限时 runner 只报计数，超过预览上限时不带预览。
+const MAX_REPORT_CHARS = 1024 * 1024;
+export const MAX_ROW_NODES = 300;
+const MAX_ROW_CHARS = 2048;
+// 与 backend/app/scan/reporter.py 的 ROW_FIELDS 同一份。
+const ROW_TEXT_FIELDS = [
+  "node", "type", "status", "exit_ip", "country", "country_code", "region", "city", "rdns", "isp",
+  "as_org", "usage_type", "native_status", "ipqs_grade", "ipx_grade",
+];
+const ROW_URL_FIELDS = ["ipqs_report_url", "ipx_report_url"];
+const ROW_INT_FIELDS = ["asn", "coffee_score", "ipqs_score", "ipx_score", "score"];
+const ROW_BOOL_FIELDS = ["is_residential", "is_datacenter", "is_native"];
+const ROW_FIELDS = new Set([
+  "node_index", ...ROW_TEXT_FIELDS, ...ROW_URL_FIELDS, ...ROW_INT_FIELDS, ...ROW_BOOL_FIELDS,
+  "network_source", "ipure_scores", "requests",
+]);
+const NETWORK_SOURCE_KEYS = ["exit_ip", "geo", "isp", "kind", "native"];
 const MAX_COUNT = 100_000;
 export const MAX_REPORT_NODES = 1000;
 // 节点的几档：等待 → 启动代理 / 连检测站 / 查 IP 质量（失败后进入「重试」再走一遍）→ 三种终态。
@@ -71,7 +89,54 @@ function normalizeNodes(raw, counts) {
   return nodes;
 }
 
-/** 校验并规整 runner 的一条报告；任何一项不合规都整条拒收，不做部分采信。 */
+function nullable(value, check) {
+  return value === null || value === undefined ? true : check(value);
+}
+
+function smallInt(value) {
+  return Number.isSafeInteger(value) && value >= -1 && value <= 4_294_967_295;
+}
+
+function flatMap(value, keys, check) {
+  if (!isRecord(value)) return false;
+  const entries = Object.entries(value);
+  return entries.length <= keys.length + 7 && entries.every(([key, item]) =>
+    (keys.length === 0 || keys.includes(key)) && /^[a-z_]{1,24}$/u.test(key) && nullable(item, check));
+}
+
+/** 一行表格预览；任何一项不合规返回 null。 */
+function normalizeRow(raw, nodes) {
+  if (!isRecord(raw) || JSON.stringify(raw).length > MAX_ROW_CHARS) return null;
+  if (!Object.keys(raw).every((key) => ROW_FIELDS.has(key))) return null;
+  const index = raw.node_index;
+  // 预览只属于已经落定为完整 / 部分的那个节点。
+  if (!Number.isSafeInteger(index) || !["success", "partial"].includes(nodes[index]?.s)) return null;
+  if (raw.status !== nodes[index].s) return null;
+  if (!ROW_TEXT_FIELDS.every((key) => nullable(raw[key], (value) => shortText(value, 200) !== null))) return null;
+  if (!ROW_URL_FIELDS.every((key) => nullable(raw[key], (value) => shortText(value, 200) !== null && value.startsWith("https://")))) return null;
+  if (!ROW_INT_FIELDS.every((key) => nullable(raw[key], smallInt))) return null;
+  if (!ROW_BOOL_FIELDS.every((key) => nullable(raw[key], (value) => typeof value === "boolean"))) return null;
+  if (!nullable(raw.network_source, (value) => flatMap(value, NETWORK_SOURCE_KEYS, (item) => shortText(item, 16) !== null))) return null;
+  if (!nullable(raw.ipure_scores, (value) => flatMap(value, [], smallInt))) return null;
+  if (!nullable(raw.requests, (value) => isRecord(value) && Object.keys(value).join() === "ipure" &&
+    flatMap(value.ipure, ["error_type"], (item) => shortText(item, 40) !== null))) return null;
+  return raw;
+}
+
+/**
+ * 预览行与读数自洽：每行对应一个已落定为完整 / 部分的节点，节点序号不重复。
+ * 不合规时只丢掉这一批预览（页面退回只画读数），读数本身照收——预览是锦上添花。
+ */
+function normalizeRows(raw, nodes) {
+  if (raw === undefined || raw === null || !nodes) return null;
+  if (!Array.isArray(raw) || raw.length > MAX_ROW_NODES || raw.length > nodes.length) return null;
+  const rows = raw.map((row) => normalizeRow(row, nodes));
+  if (rows.includes(null)) return null;
+  if (new Set(rows.map((row) => row.node_index)).size !== rows.length) return null;
+  return rows;
+}
+
+/** 校验并规整 runner 的一条报告；读数任何一项不合规都整条拒收，不做部分采信。 */
 export function normalizeReport(payload) {
   if (!isRecord(payload)) throw invalidReport();
   const requestId = typeof payload.request_id === "string" ? payload.request_id : "";
@@ -89,6 +154,7 @@ export function normalizeReport(payload) {
   if ([total, completed, success, partial, failed].includes(null)) throw invalidReport();
   if (completed > total || success + partial + failed !== completed) throw invalidReport();
   const nodes = normalizeNodes(payload.nodes, { total, success, partial, failed });
+  const rows = normalizeRows(payload.rows, nodes);
   return {
     request_id: requestId,
     run_id: runId,
@@ -100,6 +166,7 @@ export function normalizeReport(payload) {
     partial,
     failed,
     nodes,
+    rows,
   };
 }
 
@@ -174,7 +241,10 @@ export async function readScanProgress(env, requestId, run, { withNodes = false 
       partial: stored.partial,
       failed: stored.failed,
       updated_at: typeof stored.updated_at === "string" ? stored.updated_at : null,
-      ...(withNodes ? { nodes: Array.isArray(stored.nodes) ? stored.nodes : null } : {}),
+      ...(withNodes ? {
+        nodes: Array.isArray(stored.nodes) ? stored.nodes : null,
+        rows: Array.isArray(stored.rows) ? stored.rows : null,
+      } : {}),
     };
   } catch {
     return null;
@@ -213,7 +283,7 @@ function isStale(stored, incoming) {
  * 每个 request_id 一个实例，存这次扫描在 Worker 侧的全部状态：
  * - `subscription`：页面交来、等 runner 领取的订阅地址（15 分钟过期，领取即删）；
  * - `runner`：领取时绑定的运行身份与 runner 令牌的 SHA-256（令牌本身不落盘）；
- * - `report`：最新一条进度报告（含逐节点读数，最大约 150KB，远低于 SQLite 后端单值 2MB 的上限）。
+ * - `report`：最新一条进度报告（含逐节点读数与表格预览，最大约 1MB，低于 SQLite 后端单值 2MB 的上限）。
  * 存储里都是 Worker 已经校验过的规整对象（只有本 Worker 能拿到这个 namespace）。
  * 第一次写入起 6 小时整体清空；订阅地址到期由同一个 alarm 提前删掉。
  */
