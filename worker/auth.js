@@ -107,7 +107,8 @@ export async function verifyScanToken(env, token, requestId) {
 
 export const SESSION_COOKIE = "__Host-best-ip-session";
 export const LOGIN_CSRF_COOKIE = "__Host-best-ip-login-csrf";
-export const SESSION_TTL_SECONDS = 12 * 60 * 60;
+// 400 天是 Chrome 对 Cookie Max-Age 的上限：每个浏览器登录一次即可；要让会话全部失效就改 SITE_PASSWORD。
+export const SESSION_TTL_SECONDS = 400 * 24 * 60 * 60;
 
 export function assertLoginConfigured(env) {
   if (typeof env.SITE_PASSWORD !== "string" || env.SITE_PASSWORD.length < 16 || env.SITE_PASSWORD.length > 1024 ||

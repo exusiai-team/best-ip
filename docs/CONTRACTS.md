@@ -58,7 +58,7 @@ except GET/POST `/login`, GET/POST `/logout`, and GET `/login.css`. The subscrip
 relay in the next paragraph is a separate server-to-server endpoint guarded by its own
 shared secret instead of the browser session.
 Login accepts a URL-encoded password form (8192-byte cap), returning a 303 to
-`/` and a 12-hour signed `__Host-best-ip-session` cookie with Secure,
+`/` and a 400-day signed `__Host-best-ip-session` cookie with Secure,
 HttpOnly, SameSite=Strict and Path=/. Wrong passwords return 401. Passwords
 must contain 16–1024 characters. Changing SITE_PASSWORD or rotating GITHUB_TOKEN
 invalidates existing sessions (both HMAC keys are derived from GITHUB_TOKEN
