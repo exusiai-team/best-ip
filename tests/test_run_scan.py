@@ -24,6 +24,10 @@ proxies:
 """
 
 
+async def _no_family_probe() -> dict[int, str]:
+    return {}
+
+
 @pytest.fixture(autouse=True)
 def _no_relay(monkeypatch):
     for name in (
@@ -63,6 +67,7 @@ async def test_cli_scan_publishes_verified_artifact(tmp_path, capsys):
             node_runner=runner,
             download=download,
             resolve_interface=lambda configured: None,
+            resolve_family_probe=_no_family_probe,
         )
 
     async def download(url, **_):

@@ -371,8 +371,34 @@ function identCell(document, result) {
   return td;
 }
 
+/** 双栈节点的第二行不占名次：排名格留空，读屏仍说清它属于第几位。 */
+function altRankCell(document, position) {
+  const td = cell(document, "rank", "rank");
+  td.setAttribute("aria-label", `第 ${position} 位的另一族出口`);
+  return td;
+}
+
+/** 第二行的节点格：不重复节点名，只说「同一节点的 IPv4 / IPv6 出口」。 */
+function altIdentCell(document, result) {
+  const td = cell(document, "ident", "ident ident-alt");
+  const label = el(document, "span", "node-alt");
+  label.textContent = `↳ 同节点 IPv${result.family} 出口`;
+  // 状态行即使空着也要放：它撑住 19px，第二行与节点行同高（见 styles.css 的 .ident-sub）。
+  const sub = el(document, "span", "ident-sub");
+  if (result.status === "partial") sub.append(chip(document, STATUS_LABELS.partial, "warn"));
+  td.append(label, sub);
+  td.title = `${result.node || "未命名节点"} 的 IPv${result.family} 出口`;
+  return td;
+}
+
 function ipCell(document, result) {
   const td = cell(document, "ip", "cell-ip");
+  if (result.family) {
+    const tag = el(document, "span", "ip-family");
+    tag.textContent = `v${result.family}`;
+    tag.title = `IPv${result.family} 出口（这个节点同时有 IPv4 与 IPv6 出口）`;
+    td.append(tag);
+  }
   const code = el(document, "code", "ip");
   code.textContent = result.exit_ip;
   const confirmedBy = { ipx: "ipx.al", who: "1ms who", ipure: "IPure" }[result.sources?.ip];
@@ -643,8 +669,14 @@ export function createRow(result, { position, tier }, document) {
   row.dataset.status = result.status || "failed";
   row.dataset.verdict = verdictOf(result);
   if (tier) row.dataset.tier = "top";
+  if (result.family) row.dataset.family = String(result.family);
 
-  row.append(rankCell(document, position), identCell(document, result));
+  if (result.child) {
+    row.classList.add("row-alt");
+    row.append(altRankCell(document, position), altIdentCell(document, result));
+  } else {
+    row.append(rankCell(document, position), identCell(document, result));
+  }
 
   if (result.exit_ip) {
     row.append(

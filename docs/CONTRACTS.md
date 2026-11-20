@@ -307,6 +307,28 @@ also requires `requests.ipx.data.ip` to equal `exit_ip` and `data.score` to equa
 `type_verdict`), `native`, `registered_country` — plus items (negative `points` are
 deductions) and ceiling. A missing ipx report makes the node `partial`
 (`completeness.checks.ipx_recorded`); `ipx.al` is in the Mihomo allowlist.
+Dual stack (`alt_exit`, optional). At job start the scanner resolves one A and one AAAA
+address of `who.1ms.dog` over public DoH (none → the probe is skipped for the whole job).
+Each node's Mihomo routes exactly those two addresses (`IP-CIDR`/`IP-CIDR6 …,no-resolve`)
+to the node, and at second 0 the collector asks `/api/me` through each address as an IP
+literal (own CONNECT, TLS SNI and certificate check on `who.1ms.dog`), which forces the node
+to leave over that family. When the main exit IP is known and the probe of the *other*
+family echoed an address of that family, the full by-IP group (lookup, global ping,
+portscan, pingcheck, IPure, 1ms IPQS, ipx) runs again for it and the record gains
+`alt_exit`: `exit_ip`, `ip_version` (4/6, the family of `exit_ip`, never the main one's),
+`status` (success/partial by the same score-source rule), `error`, the same by-IP display
+fields as the main record (identity, `network_source`, scores, ping/port/pingcheck
+summaries, `related_domains`), `proxy_evidence` (`exit_ip_source:"who"` and the three
+`*_via_direct_fallback` flags), `completeness` and `requests` (the probe answer as `who`
+plus the by-IP requests; no trace, no GPT probe — those describe the node, not an address).
+An echo of the wrong family (some nodes re-resolve the SNI name) or of the same family as
+the main exit is ignored. The validator rejects `alt_exit` on failed records, keys outside
+that set, a same-family address, a status other than success/partial, a `requests.who`
+that is not a proxied answer for `alt_exit.exit_ip`, and runs the identity, IPure, 1ms
+IPQS and ipx checks on it exactly as on the main record. It is not in the manifest summary
+or the live-progress preview rows; the page draws it as a second row under its node
+(not counted as a node, no rank, sorted with its node; search and column filters keep the
+node when either row matches).
 Retry metadata, when present, must be internally consistent.
 Required and optional record fields are enforced by Python's ResultStore validator;
 fixtures carry the minimal valid set, not a real enrichment response.

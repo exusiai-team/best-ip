@@ -69,6 +69,7 @@ class NodeRunner:
         outbound_interface: str | None,
         on_stage: StageCallback | None = None,
         ip_cache: IpCache | None = None,
+        family_probe: dict[int, str] | None = None,
     ) -> NodeOutcome:
         """检测一个节点：先试一次；失败且值得重试时，余下的尝试**并行**跑，谁先成功用谁。
 
@@ -95,6 +96,7 @@ class NodeRunner:
                 phase_ms=phase_ms,
                 on_stage=on_stage,
                 ip_cache=ip_cache,
+                family_probe=family_probe,
             )
 
         first = await attempt(1)
@@ -148,6 +150,7 @@ class NodeRunner:
         phase_ms: dict[str, int],
         on_stage: StageCallback | None,
         ip_cache: IpCache | None = None,
+        family_probe: dict[int, str] | None = None,
     ) -> _Attempt:
         """一次尝试：独立的 Mihomo 进程与工作目录，结束时（含被取消）确认清理。"""
 
@@ -179,6 +182,12 @@ class NodeRunner:
                 selector_names=[node_name],
                 outbound_interface=outbound_interface,
                 dns_bootstrap_proxy=dns_bootstrap_proxy,
+                # 没有双栈探测地址时不传：替身 Mihomo / 采集器不必认识这个参数。
+                **(
+                    {"family_probe_addresses": list(family_probe.values())}
+                    if family_probe
+                    else {}
+                ),
             )
             if on_stage:
                 on_stage("start", number, None)
@@ -202,6 +211,7 @@ class NodeRunner:
                 timeout_ms=self.settings.page_timeout_ms,
                 # 没有缓存时不传：替身采集器不必认识这个参数。
                 **({"ip_cache": ip_cache} if ip_cache is not None else {}),
+                **({"family_probe": family_probe} if family_probe else {}),
             )
             if on_stage:
                 on_stage("connect", number, None)
