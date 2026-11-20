@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from backend.app.results.artifact import build_artifact
+from backend.app.results.artifact import build_artifact, credential_values
 from backend.app.results.store import ResultStore
 from backend.app.results.validation import ResultStoreError, validate_node
 
@@ -149,6 +149,31 @@ def test_artifact_refuses_subscription_secrets(tmp_path, make_success):
     exported = _exported(store, [record])
     with pytest.raises(ResultStoreError, match="凭据"):
         build_artifact(exported, JOB_ID, 42, 1, {"secret-token"})
+
+
+def test_short_numeric_credential_does_not_match_numeric_fields(tmp_path, make_success):
+    # socks5 节点的 username/password 是同一个短数字时，数字字段（total、延迟、端口）
+    # 恰好相等不算泄露；同值出现在字符串字段里仍然拒绝。
+    records = [make_success(0)]
+    store = _store_with(tmp_path, records)
+    exported = _exported(store, records)
+    assert exported["total"] == 1
+    build_artifact(exported, JOB_ID, 42, 1, {"1"})
+
+    record = make_success(0, name="1234")
+    store = _store_with(tmp_path / "leak", [record])
+    exported = _exported(store, [record])
+    with pytest.raises(ResultStoreError, match="凭据"):
+        build_artifact(exported, JOB_ID, 42, 1, {"1234"})
+
+
+def test_null_credentials_are_not_collected():
+    content = (
+        b"proxies:\n"
+        b"  - {name: a, type: http, username: null, password: ~}\n"
+        b"  - {name: b, type: socks5, username: 1234}\n"
+    )
+    assert credential_values(content) == {"1234"}
 
 
 def test_artifact_detects_tampered_record(tmp_path, make_success):
