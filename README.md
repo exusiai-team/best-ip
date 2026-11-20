@@ -125,7 +125,7 @@ Worker 使用 Static Assets 托管 `frontend-next/`；当前配置不使用 Clou
 
 以前的 `SCAN_KEY_ID`、`SCAN_TOKEN_SECRET`、`GITHUB_APP_INSTALLATION_ID`、`GITHUB_APP_ID`、`GITHUB_APP_PRIVATE_KEY`、`SUBSCRIPTION_RELAY_TOKEN`（Worker），以及 `SCAN_PRIVATE_KEY_PEM`、`SCAN_RELAY_TOKEN`、`SITE_PASSWORD`、变量 `SCAN_KEY_ID`、`SCAN_RELAY_URL`（Actions）都可以删除。
 
-打开网站后输入访问密码。登录会话有效期 12 小时，保存在 Secure、HttpOnly、SameSite=Strict 的主机专属 Cookie 中；页面提供退出登录入口。修改 `SITE_PASSWORD` 或轮换 `GITHUB_TOKEN` 后旧会话失效。退出登录清除当前浏览器 Cookie，其他浏览器的会话不受影响。密码和 token 只放 Worker 运行时 Secrets，不放 Build variables 或仓库。
+打开网站后输入访问密码。登录会话有效期 400 天（Chrome 的 Cookie 上限），每个浏览器登录一次即可，保存在 Secure、HttpOnly、SameSite=Strict 的主机专属 Cookie 中；页面提供退出登录入口。修改 `SITE_PASSWORD` 或轮换 `GITHUB_TOKEN` 后旧会话失效。退出登录清除当前浏览器 Cookie，其他浏览器的会话不受影响。密码和 token 只放 Worker 运行时 Secrets，不放 Build variables 或仓库。
 
 登录接口为 `POST /login`，没有内置分布式尝试次数限制；如需限制在线猜测，可在 Cloudflare 为该路径配置限流规则。缺少登录配置时 Worker 返回 503；扫描配置在调用扫描功能时检查。scan token 有效期两小时，只存在页面内存并通过 `X-Best-IP-Scan-Token` 请求头发送，不进入 URL 或 localStorage。
 
