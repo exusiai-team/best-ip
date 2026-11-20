@@ -83,8 +83,10 @@ class _Upstream:
         return _ok(url, data)
 
 
-async def _collect(ip_cache=None, port=7890):
-    collector = CoffeeCollector(f"http://127.0.0.1:{port}", timeout_ms=5000, ip_cache=ip_cache)
+async def _collect(ip_cache=None, port=7890, family_probe=None):
+    collector = CoffeeCollector(
+        f"http://127.0.0.1:{port}", timeout_ms=5000, ip_cache=ip_cache, family_probe=family_probe
+    )
     return await collector.collect(
         job_id="job",
         node_index=0,
@@ -178,6 +180,71 @@ async def test_missing_score_source_makes_the_node_partial(monkeypatch):
     record = await _collect()
     assert record["status"] == "partial"
     assert record["completeness"]["partial_reasons"] == ["ipure_recorded"]
+
+
+V6_IP = "2001:db8::7"
+FAMILY_PROBE = {4: "192.0.2.10", 6: "2001:db8:ffff::10"}
+
+
+def _family_answers(monkeypatch, answers):
+    """双栈探测替身：按所连 who 地址的族回 answers[族]（None = 这一族连不上）。"""
+
+    probed = []
+
+    async def request_family(proxy_url, address, *, timeout_seconds):
+        version = 6 if ":" in address else 4
+        probed.append(version)
+        ip = answers.get(version)
+        if ip is None:
+            return {"ok": False, "skipped": True, "data": None, "error": "连接失败"}
+        return {**_ok("who", {"ip": ip}), "via_mihomo": True}
+
+    monkeypatch.setattr(collector_module.who_source, "request_family", request_family)
+    return probed
+
+
+async def test_dual_stack_node_gets_an_alt_exit_for_the_other_family(monkeypatch):
+    upstream = _Upstream(monkeypatch, trace_ip=TRACE_IP, who_ip=TRACE_IP)
+    probed = _family_answers(monkeypatch, {4: TRACE_IP, 6: V6_IP})
+    record = await _collect(family_probe=FAMILY_PROBE)
+    alt = record["alt_exit"]
+    assert sorted(probed) == [4, 6]
+    assert record["exit_ip"] == TRACE_IP
+    assert alt["exit_ip"] == V6_IP and alt["ip_version"] == 6
+    assert alt["status"] == "success"
+    assert alt["network_source"]["exit_ip"] == "ipx"
+    assert alt["requests"]["who"]["data"]["ip"] == V6_IP
+    assert alt["requests"]["ipqs"]["data"] == {"ip": V6_IP}
+    assert alt["requests"]["lookup"]["data"] == {"ip": V6_IP}
+    # 主出口与另一族各一组按 IP 查询（lookup / ping / 端口 / 连通 / IPure / IPQS）。
+    assert sorted({ip for _, ip, _ in upstream.calls}) == sorted({TRACE_IP, V6_IP})
+    assert len(upstream.calls) == 12
+
+
+async def test_alt_exit_is_skipped_when_the_node_ignores_the_family(monkeypatch):
+    # 节点按 SNI 重新解析、改走 IPv4：回显与所连地址不同族，不另起一行。
+    upstream = _Upstream(monkeypatch, trace_ip=TRACE_IP, who_ip=TRACE_IP)
+    _family_answers(monkeypatch, {4: TRACE_IP, 6: TRACE_IP})
+    record = await _collect(family_probe=FAMILY_PROBE)
+    assert "alt_exit" not in record
+    assert len(upstream.calls) == 6
+
+
+async def test_alt_exit_is_skipped_without_an_other_family_exit(monkeypatch):
+    _Upstream(monkeypatch, trace_ip=TRACE_IP, who_ip=TRACE_IP)
+    _family_answers(monkeypatch, {4: TRACE_IP, 6: None})
+    record = await _collect(family_probe=FAMILY_PROBE)
+    assert "alt_exit" not in record
+    assert record["status"] == "success"
+
+
+async def test_ipv6_default_exit_gets_an_ipv4_alt_exit(monkeypatch):
+    _Upstream(monkeypatch, trace_ip=V6_IP, who_ip=V6_IP)
+    _family_answers(monkeypatch, {4: TRACE_IP, 6: V6_IP})
+    record = await _collect(family_probe=FAMILY_PROBE)
+    assert record["exit_ip"] == V6_IP
+    assert record["alt_exit"]["exit_ip"] == TRACE_IP
+    assert record["alt_exit"]["ip_version"] == 4
 
 
 async def test_nodes_sharing_an_exit_ip_ask_ip_lookups_once(monkeypatch):

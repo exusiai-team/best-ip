@@ -8,7 +8,7 @@ from backend.app.results.artifact import build_artifact
 from backend.app.results.store import ResultStore
 from backend.app.results.validation import ResultStoreError, validate_node
 
-from .conftest import JOB_ID
+from .conftest import JOB_ID, alt_exit
 
 
 def _job(total: int) -> dict:
@@ -60,6 +60,42 @@ def test_validate_node_rejects_broken_success_records(make_success, mutate, mess
     record = make_success(0)
     mutate(record)
     with pytest.raises(ResultStoreError, match=message):
+        validate_node(JOB_ID, 0, record)
+
+
+def test_alt_exit_of_the_other_family_is_accepted(make_success):
+    record = make_success(0)
+    record["alt_exit"] = alt_exit()
+    validate_node(JOB_ID, 0, record)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        # 同族换了个地址是多出口，不是双栈。
+        (lambda a: a.update(exit_ip="198.51.100.7", ip_version=4,
+                            requests={"who": {"ok": True, "via_mihomo": True,
+                                              "data": {"ip": "198.51.100.7"}}}), "地址族"),
+        (lambda a: a.update(ip_version=4), "地址族"),
+        (lambda a: a.update(status="failed"), "状态"),
+        (lambda a: a.update(node="x"), "字段集合"),
+        (lambda a: a["requests"]["who"].update(via_mihomo=False), "回显"),
+        (lambda a: a["requests"]["who"]["data"].update(ip="2001:db8::8"), "回显"),
+        (lambda a: a.update(ipx_score=90), "ipx.al"),
+    ],
+)
+def test_alt_exit_rejects_broken_evidence(make_success, mutate, message):
+    record = make_success(0)
+    record["alt_exit"] = alt_exit()
+    mutate(record["alt_exit"])
+    with pytest.raises(ResultStoreError, match=message):
+        validate_node(JOB_ID, 0, record)
+
+
+def test_failed_record_must_not_carry_alt_exit(make_failed):
+    record = make_failed(0)
+    record["alt_exit"] = alt_exit()
+    with pytest.raises(ResultStoreError, match="另一族"):
         validate_node(JOB_ID, 0, record)
 
 

@@ -308,7 +308,27 @@ function toRow(record) {
     // 也可能恰好缺出口 IP（trace 没成功），那时它就是这行唯一的解释。
     error: text(record?.error) || text(record?.transport_error),
     error_step: errorStepOf(record),
+    ...familyOf(record, status),
   };
+}
+
+function ipFamily(ip) {
+  return ip.includes(":") ? 6 : 4;
+}
+
+/**
+ * 双栈节点的另一族出口（record.alt_exit）→ 第二行。它只带按 IP 的字段，节点名与协议借主记录；
+ * family 只在双栈时给（4 / 6），单栈节点的行上不多一个「IPv4」标记。
+ */
+function familyOf(record, status) {
+  const alt = record?.alt_exit;
+  const exitIp = text(record?.exit_ip);
+  if (status === "failed" || !exitIp || !alt || typeof alt !== "object" || !text(alt.exit_ip)) {
+    return { family: null, alt: null };
+  }
+  const row = toRow({ ...alt, alt_exit: null, node: record.node, type: record.type });
+  if (!row.exit_ip || ipFamily(row.exit_ip) === ipFamily(exitIp)) return { family: null, alt: null };
+  return { family: ipFamily(exitIp), alt: { ...row, family: ipFamily(row.exit_ip), child: true } };
 }
 
 /** 按 node_index 排序：导出顺序理论上就是它，但排名列读的就是行序，排一次不留隐患。 */

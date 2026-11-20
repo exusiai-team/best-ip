@@ -799,6 +799,32 @@ select.filter-input {
   line-height: 1.35;
 }
 
+/* 双栈节点的第二行（另一族出口）：不重复节点名，只写「↳ 同节点 IPv4/IPv6 出口」；
+   与节点行之间的分隔线改成虚线，两行读起来是一组。 */
+.ident .node-alt {
+  display: block;
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.row:has(+ .row-alt) > td { border-bottom-style: dashed; }
+.ip-family {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 5px;
+  padding: 1px 4px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-3);
+  color: var(--ink-3);
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1.35;
+  vertical-align: middle;
+}
+
 /* --- 通用药丸 --- */
 .chip {
   display: inline-flex; align-items: center; gap: 4px;

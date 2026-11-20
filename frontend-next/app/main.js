@@ -137,6 +137,13 @@ function buildSearchIndex(nodes) {
         result.native_status,
         result.error,
         STATUS_LABELS[result.status] || "",
+        // 双栈节点的另一族出口：搜它的 IP / 服务商也要找得到这个节点。
+        result.alt?.exit_ip,
+        result.alt?.country,
+        result.alt?.city,
+        result.alt?.isp,
+        result.alt?.asn ? `AS${result.alt.asn}` : "",
+        result.family ? "ipv4 ipv6 双栈" : "",
       ]
         .filter(Boolean)
         .join(" ")
@@ -207,7 +214,8 @@ function visibleRows() {
   const filtered = dataset.nodes.filter((result) => {
     if (state.status !== "all" && result.status !== state.status) return false;
     if (needle && !dataset.index.get(result).includes(needle)) return false;
-    return columnTest(result);
+    // 列筛选两行任一命中就留下整个节点：台湾 03 的 IPv4 是住宅，筛「住宅」时它不能消失。
+    return columnTest(result) || Boolean(result.alt && columnTest(result.alt));
   });
   return filtered.sort(comparator(state.sorts, COLUMN_BY_KEY, (result) => dataset.order.get(result) ?? 0));
 }
@@ -339,6 +347,8 @@ function render() {
       // 只有「按分数降序」时前三名才真的是前三名；按名字排序时给第 1 名戴金牌是撒谎。
       const tier = ranked && position <= 3 && primary.sortValue(result) !== null;
       fragment.append(createRow(result, { position, tier }, document));
+      // 另一族出口紧跟在节点行下面：不占名次、不计节点数，排序筛选都跟着节点走。
+      if (result.alt) fragment.append(createRow(result.alt, { position, tier: false }, document));
     });
 
     elements.rows.replaceChildren(fragment);

@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import ipaddress
 from collections.abc import AsyncIterator, Callable, Coroutine
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
@@ -48,16 +48,26 @@ from .ipure import IPURE_NOT_INDEXED, _ipure_field, _ipure_scores, _ipure_url
 from .registry import ENRICHMENT_HOSTS, SCORE_SOURCES, SOURCE_BY_NAME, SOURCES
 from .values import _clean_text
 
+# 双栈探测的上限：没有这一族出口的节点多半当场被拒，少数要等到连接超时。
+FAMILY_PROBE_TIMEOUT_SECONDS = 8.0
+
 
 class CoffeeCollector:
     """Coordinate dependent source requests and assemble record schema v1."""
 
     def __init__(
-        self, proxy_url: str, *, timeout_ms: int, ip_cache: IpCache | None = None
+        self,
+        proxy_url: str,
+        *,
+        timeout_ms: int,
+        ip_cache: IpCache | None = None,
+        family_probe: dict[int, str] | None = None,
     ) -> None:
         self.transport = ProxyTransport(proxy_url, timeout_ms=timeout_ms)
         # 同一任务内各节点共用：同一出口 IP 的按 IP 查询只问一次（见 ip_cache.py）。
         self.ip_cache = ip_cache
+        # who.1ms.dog 的 {4: IPv4 地址, 6: IPv6 地址}：逼节点按另一族出站，双栈节点多出一行。
+        self.family_probe = dict(family_probe or {})
 
     async def collect(
         self,
@@ -102,23 +112,32 @@ class CoffeeCollector:
                 )
             ) as ipx_task,
             _background(gpt_checks.requests(self.transport, client)) as gpt_task,
+            AsyncExitStack() as probes,
         ):
+            # 双栈探测也在第 0 秒发出：它只问 who，结果要到出口 IP 定下后才用得上。
+            family_tasks = {
+                version: await probes.enter_async_context(
+                    _background(
+                        who_source.request_family(
+                            self.transport.proxy_url,
+                            address,
+                            timeout_seconds=self.transport.deadline(FAMILY_PROBE_TIMEOUT_SECONDS),
+                        )
+                    )
+                )
+                for version, address in self.family_probe.items()
+            }
             exit_ip, stage = await self._ip_stage(client, trace_task, who_task, ipx_task)
             trace = trace_task.result()
             gpt_requests: dict[str, dict[str, Any]] = {}
+            alt_exit: dict[str, Any] | None = None
             if stage is not None:
                 if on_exit_ip is not None:
                     on_exit_ip()
+                alt: tuple[_IpStage, dict[str, Any]] | None = None
                 try:
-                    lookup = await stage.tasks["lookup"]
-                    lookup_data = lookup.get("data") if isinstance(lookup.get("data"), dict) else {}
-                    if lookup.get("ok") and not _is_same_ip(lookup_data.get("ip"), exit_ip):
-                        lookup = {
-                            **lookup,
-                            "ok": False,
-                            "error": "Coffee lookup 未返回与出口 IP 一致的数据",
-                        }
-                        lookup_data = {}
+                    alt = await self._alt_stage(client, exit_ip, family_tasks, ipx_task)
+                    lookup, lookup_data = _checked_lookup(await stage.tasks["lookup"], exit_ip)
                     global_ping = await stage.tasks["global_ping"]
                     port_scan = await stage.tasks["port_scan"]
                     ping_check = await stage.tasks["ping_check"]
@@ -126,8 +145,17 @@ class CoffeeCollector:
                     ipure = await stage.tasks["ipure"]
                     ipqs = await stage.tasks["ipqs"]
                     ipx = await stage.tasks["ipx"]
+                    if alt is not None:
+                        alt_stage, probe = alt
+                        alt_exit = _alt_exit(
+                            alt_stage.ip,
+                            probe,
+                            {name: await task for name, task in alt_stage.tasks.items()},
+                        )
                 finally:
                     await stage.cancel()
+                    if alt is not None:
+                        await alt[0].cancel()
             else:
                 reason = "未取得出口 IP"
                 lookup = _missing_result("", reason, skipped=True)
@@ -160,28 +188,16 @@ class CoffeeCollector:
             *((who, ipx) if exit_ip else ()),
         )
         gpt_check = _gpt_check_summary(gpt_requests, lookup_data)
-        coffee_summary = _profile_summary(lookup_data)
-        ipure_scores = _ipure_scores(ipure)
-        identity = _network_identity(
+        summary = _ip_summary(
             exit_ip,
             stage.source if stage is not None else "",
-            ipx.get("data"),
-            who.get("data"),
-            _ipure_field(ipure, "network"),
-            ipqs.get("data"),
-            coffee_summary,
+            lookup_data=lookup_data,
+            ipure=ipure,
+            ipqs=ipqs,
+            ipx=ipx,
+            who=who,
+            gpt_check=gpt_check,
         )
-        summary = {
-            **coffee_summary,
-            **identity,
-            "coffee_score": coffee_summary["score"],
-            "score": ipure_scores["total"],
-            "ipure_scores": ipure_scores,
-            "ipure_report_url": _ipure_field(ipure, "report_url"),
-            "gpt_check": gpt_check,
-            **ipqs_source.ipqs_fields(ipqs),
-            **ipx_source.ipx_fields(ipx),
-        }
         finished_at = _now()
 
         return {
@@ -202,6 +218,8 @@ class CoffeeCollector:
             "port_scan": _port_scan_summary(port_scan),
             "ping_check": _ping_check_summary(ping_check),
             "related_domains": _related_domains(lookup_data),
+            # 另一族的出口（双栈节点才有）：结构与本记录的按 IP 部分相同，页面画成第二行。
+            **({"alt_exit": alt_exit} if alt_exit is not None else {}),
             "elapsed_ms": round((perf_counter() - started) * 1000),
             "proxy_evidence": {
                 "transport": "workspace_mihomo_mixed_port",
@@ -282,6 +300,28 @@ class CoffeeCollector:
                 await stage.cancel()
             raise
 
+    async def _alt_stage(
+        self,
+        client: httpx.AsyncClient,
+        exit_ip: str,
+        family_tasks: dict[int, asyncio.Task[Any]],
+        ipx_task: asyncio.Task[Any],
+    ) -> tuple[_IpStage, dict[str, Any]] | None:
+        """主出口定下后，看另一族的探测有没有回显出口；有就为它再开一组按 IP 查询。
+
+        只认与主出口不同族的回显：同族换了个地址是多出口节点，不是双栈，不另起一行。
+        """
+
+        other = 6 if ipaddress.ip_address(exit_ip).version == 4 else 4
+        task = family_tasks.get(other)
+        if task is None:
+            return None
+        probe = await task
+        ip = _echoed_ip(probe)
+        if not ip or ipaddress.ip_address(ip).version != other:
+            return None
+        return self._start_ip_stage(client, ip, "who", ipx_task), probe
+
     def _start_ip_stage(
         self, client: httpx.AsyncClient, ip: str, source: str, ipx_task: asyncio.Task[Any]
     ) -> _IpStage:
@@ -357,6 +397,97 @@ class _IpStage:
             if not task.done():
                 task.cancel()
         await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+
+
+def _checked_lookup(
+    lookup: dict[str, Any], exit_ip: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Coffee lookup 回答的必须是这个出口 IP，否则当作没拿到；返回 (请求记录, 可用数据)。"""
+
+    data = lookup.get("data") if isinstance(lookup.get("data"), dict) else {}
+    if lookup.get("ok") and not _is_same_ip(data.get("ip"), exit_ip):
+        return {**lookup, "ok": False, "error": "Coffee lookup 未返回与出口 IP 一致的数据"}, {}
+    return lookup, data
+
+
+def _ip_summary(
+    exit_ip: str,
+    exit_ip_source: str,
+    *,
+    lookup_data: dict[str, Any],
+    ipure: dict[str, Any],
+    ipqs: dict[str, Any],
+    ipx: dict[str, Any],
+    who: dict[str, Any],
+    gpt_check: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """一个出口 IP 的展示字段：Coffee 画像、归属（ipx 优先）、四家分数。主出口与另一族共用。"""
+
+    coffee_summary = _profile_summary(lookup_data)
+    ipure_scores = _ipure_scores(ipure)
+    identity = _network_identity(
+        exit_ip,
+        exit_ip_source,
+        ipx.get("data"),
+        who.get("data"),
+        _ipure_field(ipure, "network"),
+        ipqs.get("data"),
+        coffee_summary,
+    )
+    return {
+        **coffee_summary,
+        **identity,
+        "coffee_score": coffee_summary["score"],
+        "score": ipure_scores["total"],
+        "ipure_scores": ipure_scores,
+        "ipure_report_url": _ipure_field(ipure, "report_url"),
+        **({"gpt_check": gpt_check} if gpt_check is not None else {}),
+        **ipqs_source.ipqs_fields(ipqs),
+        **ipx_source.ipx_fields(ipx),
+    }
+
+
+def _alt_exit(ip: str, probe: dict[str, Any], results: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """另一族出口的记录：按 IP 的那组请求再跑一遍，字段与主记录的按 IP 部分同形。
+
+    连接类的检测（trace、GPT 连通）只对节点本身有意义，不重复；双栈探测的 who 回显
+    同时充当这一行的 trace（出口 IP 由它定下）。
+    """
+
+    lookup, lookup_data = _checked_lookup(results["lookup"], ip)
+    requests = {
+        "trace": probe,
+        "who": probe,
+        **{name: result for name, result in results.items() if name != "lookup"},
+        "lookup": lookup,
+    }
+    completeness = _completeness(requests, ip, lookup_data)
+    ipure, ipqs, ipx = requests["ipure"], requests["ipqs"], requests["ipx"]
+    del requests["trace"]
+    return {
+        "exit_ip": ip,
+        "ip_version": ipaddress.ip_address(ip).version,
+        "status": _node_status(ip, completeness),
+        "error": _combined_error(
+            lookup, requests["global_ping"], requests["port_scan"], requests["ping_check"],
+            ipure, ipqs, ipx,
+        ),
+        **_ip_summary(
+            ip, "who", lookup_data=lookup_data, ipure=ipure, ipqs=ipqs, ipx=ipx, who=probe
+        ),
+        "global_ping": _global_ping_summary(requests["global_ping"]),
+        "port_scan": _port_scan_summary(requests["port_scan"]),
+        "ping_check": _ping_check_summary(requests["ping_check"]),
+        "related_domains": _related_domains(lookup_data),
+        "proxy_evidence": {
+            "exit_ip_source": "who",
+            "ipure_via_direct_fallback": bool(ipure.get("direct_fallback")),
+            "ipqs_via_direct_fallback": bool(ipqs.get("direct_fallback")),
+            "ipx_via_direct_fallback": bool(ipx.get("direct_fallback")),
+        },
+        "completeness": completeness,
+        "requests": requests,
+    }
 
 
 def _echoed_ip(result: dict[str, Any]) -> str:

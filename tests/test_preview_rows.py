@@ -11,6 +11,8 @@ import pytest
 
 from backend.app.scan.reporter import live_nodes, live_rows, preview_row
 
+from .conftest import alt_exit
+
 ROOT = Path(__file__).resolve().parents[1]
 
 SCRIPT = """
@@ -104,3 +106,43 @@ def test_rows_with_subscription_secrets_are_not_sent(make_success):
 
 def test_failed_nodes_have_no_preview(make_failed):
     assert preview_row(make_failed(0)) is None
+
+
+TO_ROWS = """
+import { pathToFileURL } from "node:url";
+const [root, payload] = process.argv.slice(1);
+const { toRows } = await import(pathToFileURL(`${root}/frontend-next/app/records.js`).href);
+console.log(JSON.stringify(toRows(JSON.parse(payload))));
+"""
+
+
+def _to_rows(results: list[dict]) -> list[dict]:
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", TO_ROWS, str(ROOT),
+         json.dumps({"results": results}, ensure_ascii=False)],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    return json.loads(completed.stdout)
+
+
+def test_alt_exit_becomes_a_child_row_of_its_node(make_success, make_failed):
+    dual = _record(make_success, 0)
+    dual["alt_exit"] = {**alt_exit("2001:db8::7"), "country_code": "TW", "ipx_score": 95}
+    rows = _to_rows([dual, _record(make_success, 1), make_failed(2)])
+    # 节点数不变：第二行挂在节点行上，不是独立的一行。
+    assert len(rows) == 3
+    first, single, failed = rows
+    assert (first["exit_ip"], first["family"]) == ("203.0.113.1", 4)
+    child = first["alt"]
+    assert (child["exit_ip"], child["family"], child["child"]) == ("2001:db8::7", 6, True)
+    assert (child["node"], child["country_code"], child["ipx_score"]) == ("node-0", "TW", 95)
+    assert child["alt"] is None
+    assert (single["family"], single["alt"]) == (None, None)
+    assert (failed["family"], failed["alt"]) == (None, None)
+
+
+def test_alt_exit_of_the_same_family_is_not_drawn(make_success):
+    dual = _record(make_success, 0)
+    dual["alt_exit"] = alt_exit("198.51.100.7")
+    [row] = _to_rows([dual])
+    assert (row["family"], row["alt"]) == (None, None)

@@ -142,6 +142,21 @@ _NODE_FIELDS = {
     "requests",
     "coffee",
     "pages",
+    "alt_exit",
+}
+
+# 另一族出口（双栈节点）：只放按出口 IP 的那部分字段，节点身份与连接类检测留在主记录。
+_ALT_EXIT_FIELDS = (
+    _NODE_FIELDS
+    - {
+        "schema_version", "job_id", "node_index", "node", "type", "selected_proxy",
+        "requested_proxy", "coffee_page_url", "phase", "transport_error", "attempt_count",
+        "retry_count", "attempt_errors", "started_at", "finished_at", "gpt_check",
+        "elapsed_ms", "coffee", "pages", "alt_exit",
+    }
+) | {"ip_version"}
+_ALT_EXIT_REQUIRED_FIELDS = {
+    "exit_ip", "ip_version", "status", "error", "proxy_evidence", "completeness", "requests",
 }
 
 # 旧版本写过这三个档位字段；落盘契约已收窄，读取时忽略，历史结果仍要能打开。
@@ -258,13 +273,54 @@ def validate_node(job_id: str, index: int, record: dict[str, Any]) -> None:
         validate_ipqs(record)
         validate_ipx(record)
         validate_exit_ip(record.get("exit_ip"))
+        if "alt_exit" in record:
+            validate_alt_exit(record["alt_exit"], record["exit_ip"])
     elif status == "failed":
         if record.get("exit_ip") is not None:
             raise ResultStoreError("失败节点不能保存伪造的出口 IP")
+        if "alt_exit" in record:
+            raise ResultStoreError("失败节点不能带另一族出口")
         if not str(record.get("error") or "").strip():
             raise ResultStoreError("失败节点缺少错误原因")
     else:
         raise ResultStoreError("节点记录状态无效")
+
+
+def validate_alt_exit(alt: Any, exit_ip: str) -> None:
+    """另一族出口：必须是与主出口不同族的合法地址，且按 IP 的证据与主记录同一套校验。
+
+    它的出口 IP 只能由经代理的 who 双栈探测定下（没有宿主侧的旁路），所以 who 证据必须在。
+    """
+
+    if not isinstance(alt, dict):
+        raise ResultStoreError("另一族出口结构无效")
+    if set(alt) - _ALT_EXIT_FIELDS or _ALT_EXIT_REQUIRED_FIELDS - set(alt):
+        raise ResultStoreError("另一族出口字段集合无效")
+    validate_exit_ip(alt.get("exit_ip"))
+    version = ipaddress.ip_address(alt["exit_ip"]).version
+    if (
+        alt.get("ip_version") != version
+        or version == ipaddress.ip_address(exit_ip).version
+        or alt.get("status") not in {"success", "partial"}
+    ):
+        raise ResultStoreError("另一族出口的地址族或状态无效")
+    for field in ("proxy_evidence", "completeness", "requests"):
+        if not isinstance(alt.get(field), dict):
+            raise ResultStoreError(f"另一族出口的 {field} 无效")
+    who = alt["requests"].get("who")
+    data = who.get("data") if isinstance(who, dict) else None
+    if (
+        not isinstance(data, dict)
+        or who.get("ok") is not True
+        or who.get("via_mihomo") is not True
+        or not _same_ip(data.get("ip"), alt["exit_ip"])
+    ):
+        raise ResultStoreError("另一族出口缺少经代理的同 IP 回显")
+    validate_network_identity(alt)
+    validate_ipure_scores(alt)
+    validate_ipure_evidence(alt["proxy_evidence"], alt["requests"])
+    validate_ipqs(alt)
+    validate_ipx(alt)
 
 
 def summary(record: dict[str, Any]) -> dict[str, Any]:

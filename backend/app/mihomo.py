@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import ipaddress
 import os
 import secrets
 import socket
@@ -170,8 +171,13 @@ class MihomoProcess:
         selector_names: list[str] | None = None,
         outbound_interface: str | None = None,
         dns_bootstrap_proxy: str | None = None,
+        family_probe_addresses: list[str] | None = None,
     ) -> None:
         self.core_path = core_path
+        # who.1ms.dog 的 A / AAAA 地址：双栈探测以 IP 字面量连它，规则里只放行这几个地址。
+        self.family_probe_addresses = [
+            str(ipaddress.ip_address(address)) for address in family_probe_addresses or ()
+        ]
         self.work_dir = work_dir
         self.proxies = proxies
         self.selector_names = selector_names or [str(proxy["name"]) for proxy in proxies]
@@ -276,6 +282,11 @@ class MihomoProcess:
             "rules": [
                 # 数据源的主机从注册表派生，新增来源不会漏进 MATCH,REJECT。
                 *(f"DOMAIN,{host},{self.group_name}" for host in PROXIED_HOSTS),
+                *(
+                    f"IP-CIDR{'6' if ':' in address else ''},{address}/"
+                    f"{128 if ':' in address else 32},{self.group_name},no-resolve"
+                    for address in self.family_probe_addresses
+                ),
                 f"DOMAIN,chatgpt.com,{self.group_name}",
                 f"DOMAIN,api.openai.com,{self.group_name}",
                 "MATCH,REJECT",

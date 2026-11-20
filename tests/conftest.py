@@ -62,6 +62,31 @@ def success_record(index: int, *, job_id: str = JOB_ID, name: str | None = None)
     }
 
 
+def alt_exit(ip: str = "2001:db8::7") -> dict[str, Any]:
+    """双栈节点的另一族出口：出口 IP 由经代理的 who 双栈探测定下。"""
+
+    who = {"ok": True, "via_mihomo": True, "data": {"ip": ip}}
+    return {
+        "exit_ip": ip,
+        "ip_version": 6 if ":" in ip else 4,
+        "status": "success",
+        "error": None,
+        "score": None,
+        "ipure_scores": None,
+        "network_source": {
+            "exit_ip": "who", "geo": "who", "isp": "who", "kind": None, "native": None,
+        },
+        "proxy_evidence": {
+            "exit_ip_source": "who",
+            "ipure_via_direct_fallback": False,
+            "ipqs_via_direct_fallback": False,
+            "ipx_via_direct_fallback": False,
+        },
+        "completeness": {"checks": {"exit_ip_valid": True}},
+        "requests": {"who": who},
+    }
+
+
 def failed_record(index: int, *, job_id: str = JOB_ID) -> dict[str, Any]:
     return _failed_node(job_id, index, f"node-{index}", "ss", RuntimeError("连接被拒绝"))
 

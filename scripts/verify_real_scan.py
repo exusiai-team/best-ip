@@ -743,6 +743,12 @@ async def verify() -> None:
             "出口 IP 定于："
             + " / ".join(f"{name} {exit_sources.count(name)}" for name in ("trace", "ipx", "who"))
         )
+        dual = [record for record in scorable if isinstance(record.get("alt_exit"), dict)]
+        default_v6 = sum(":" in record["exit_ip"] for record in dual)
+        print(
+            f"双栈出口：{len(dual)}/{len(scorable)} 个节点同时有 IPv4 与 IPv6 出口"
+            f"（默认走 IPv6 的 {default_v6} 个）"
+        )
         _require_no_failed_nodes(job)
         print(
             "正式订阅可用性验收完成："

@@ -21,6 +21,7 @@ from ..mihomo import (
 )
 from ..results.store import ResultStore, ResultStoreError
 from ..sources.ip_cache import IpCache
+from ..sources.who import resolve_addresses as resolve_family_probe_addresses
 from ..subscription import (
     SubscriptionError,
     download_subscription,
@@ -68,6 +69,7 @@ class ScanJobManager:
         download: Callable[..., Any] = download_subscription,
         parse: Callable[..., Any] = parse_subscription,
         resolve_interface: Callable[..., Any] = resolve_outbound_interface,
+        resolve_family_probe: Callable[[], Any] = resolve_family_probe_addresses,
     ) -> None:
         self.settings = app_settings
         self.result_store = result_store
@@ -76,6 +78,7 @@ class ScanJobManager:
         self.download = download
         self.parse = parse
         self.resolve_interface = resolve_interface
+        self.resolve_family_probe = resolve_family_probe
         self._errors: dict[str, ScanError] = {}
         self._node_errors: dict[str, dict[int, ScanError]] = {}
         self.jobs: dict[str, dict[str, Any]] = {}
@@ -87,6 +90,8 @@ class ScanJobManager:
         self._live: dict[str, list[dict[str, Any]]] = {}
         # 每个任务一份：同一出口 IP 的按 IP 查询在节点之间只问一次（sources/ip_cache.py）。
         self._ip_caches: dict[str, IpCache] = {}
+        # 每个任务一份：who.1ms.dog 的 {4: IPv4, 6: IPv6} 地址，给双栈探测用（sources/who.py）。
+        self._family_probes: dict[str, dict[int, str]] = {}
         self._semaphore = asyncio.Semaphore(app_settings.max_parallel_jobs)
         self.node_parallelism = app_settings.max_parallel_nodes
 
@@ -384,6 +389,8 @@ class ScanJobManager:
                             node_queue.task_done()
 
                 self._ip_caches[job_id] = IpCache()
+                # 双栈探测用 who.1ms.dog 的 A / AAAA 地址；解析不到就整体跳过，节点只出一行。
+                self._family_probes[job_id] = await self.resolve_family_probe()
                 worker_count = min(self.node_parallelism, len(proxies))
                 failure_phase = "scan"
                 node_tasks = [asyncio.create_task(node_worker()) for _ in range(worker_count)]
@@ -453,6 +460,7 @@ class ScanJobManager:
                 self._errors[job_id] = classify_error(MihomoStopError())
             await self._safe_write_progress(job)
         finally:
+            self._family_probes.pop(job_id, None)
             cache = self._ip_caches.pop(job_id, None)
             if cache is not None and isinstance(job.get("metrics"), dict):
                 job["metrics"]["shared_ip_requests"] = cache.hits
@@ -504,6 +512,11 @@ class ScanJobManager:
                 outbound_interface=outbound_interface,
                 on_stage=on_stage,
                 **({"ip_cache": cache} if (cache := self._ip_caches.get(job["id"])) else {}),
+                **(
+                    {"family_probe": probe}
+                    if (probe := self._family_probes.get(job["id"]))
+                    else {}
+                ),
             )
             result = outcome.record
             if outcome.error is not None:
