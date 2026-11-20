@@ -546,7 +546,9 @@ async def _run_scan(
                 exported, job_id, args.run_id, args.run_attempt, forbidden
             )
             counts = exported["manifest"]["counts"]
-            if counts["success"] + counts["partial"] < 1:
+            # classify 复用时只重测指纹变了或上次没测通的节点，这批全失败也还有复用的结果可交。
+            reused = classify is not None and any(node.reused for node in classify.plan.nodes)
+            if counts["success"] + counts["partial"] < 1 and not reused:
                 raise ScanCLIError("scan_unavailable")
             if classify is not None:
                 classify.records = list(exported["results"])

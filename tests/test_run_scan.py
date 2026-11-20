@@ -251,3 +251,60 @@ def test_failure_file_records_the_exit_code(tmp_path):
         ]
     )
     assert code == 2 and failure.read_text() == "input_invalid"
+
+
+async def test_cli_classify_rescanned_nodes_all_failing_still_publishes_reused(tmp_path):
+    from backend.app.classify import fingerprint
+
+    mihomo = tmp_path / "mihomo"
+    mihomo.write_bytes(b"")
+    settings = Settings(
+        mihomo_path=mihomo, node_retry_backoff_ms=0, max_parallel_nodes=2, max_node_attempts=1
+    )
+    alpha = {"name": "alpha", "type": "ss", "server": "8.8.8.8", "port": 8388, "password": "pw"}
+    beta = {"name": "beta", "type": "ss", "server": "8.8.4.4", "port": 8388, "password": "pw"}
+    previous = {"nodes": [
+        {"fingerprint": fingerprint(proxy), "status": "ok", "checked_at": run_scan._iso_now(),
+         "exit_ip": "203.0.113.9"}
+        for proxy in (alpha, beta)
+    ]}
+    yaml_file = tmp_path / "subscription.yaml"
+    yaml_file.write_bytes(SUBSCRIPTION)
+    context = tmp_path / "context.json"
+    context.write_text(json.dumps({"label": "l", "reuse_hours": 20, "previous": previous}))
+    collectors = {"gamma": collector_factory(["fail"])}
+
+    class RoutingCollector:
+        def __init__(self, proxy_url, **_):
+            self.proxy_url = proxy_url
+
+        async def collect(self, *, node_name, **kwargs):
+            inner = collectors[node_name](self.proxy_url, timeout_ms=0)
+            return await inner.collect(node_name=node_name, **kwargs)
+
+    def manager_factory(app_settings, store, workspace, *, download):
+        runner = NodeRunner(
+            app_settings, mihomo_factory=FakeMihomo, collector_factory=RoutingCollector
+        )
+        return ScanJobManager(
+            app_settings, store, workspace, node_runner=runner, download=download,
+            resolve_interface=lambda configured: None, resolve_family_probe=_no_family_probe,
+        )
+
+    classify_output = tmp_path / "classify.json"
+    args = run_scan.parse_args(
+        [
+            "--request-id", "clf-partial-reuse",
+            "--subscription-yaml-file", str(yaml_file),
+            "--output-dir", str(tmp_path / "artifact"),
+            "--run-id", "7",
+            "--run-attempt", "1",
+            "--profile", "classify",
+            "--classify-output", str(classify_output),
+            "--classify-context", str(context),
+        ]
+    )
+    await run_scan.run(args, app_settings=settings, manager_factory=manager_factory)
+    result = json.loads(classify_output.read_bytes())
+    assert [node["status"] for node in result["nodes"]] == ["ok", "ok", "failed"]
+    assert result["counts"]["reused"] == 2
