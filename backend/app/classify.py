@@ -18,6 +18,7 @@ import asyncio
 import copy
 import dataclasses
 import hashlib
+import ipaddress
 import json
 import math
 import re
@@ -361,6 +362,7 @@ def _empty_entry(
         "checked_at": checked_at,
         "reused": False,
         "exit_ip": None,
+        "exit_ipv6": None,
         "country_code": None,
         "reg_country_code": None,
         "usage_type": None,
@@ -425,7 +427,29 @@ def node_from_record(node: InputNode, record: dict[str, Any]) -> dict[str, Any]:
         risk=_risk(record, ipqs),
     )
     entry["ai"]["openai"] = _openai(record)
+    entry["exit_ipv6"] = _exit_ipv6(record)
     return entry
+
+
+def _exit_ipv6(record: dict[str, Any]) -> str | None:
+    """经这个节点的 IPv6 流量出得去时的 IPv6 出口。
+
+    主出口本身是 IPv6，或经代理的 IPv6 探测有回显（classify 档记在 ipv6_exit_ip，
+    完整扫描在 alt_exit）。没测到为 None。
+    """
+
+    alt = record.get("alt_exit")
+    for value in (
+        record.get("exit_ip"),
+        record.get("ipv6_exit_ip"),
+        alt.get("exit_ip") if isinstance(alt, dict) else None,
+    ):
+        try:
+            if ipaddress.ip_address(value).version == 6:
+                return str(ipaddress.ip_address(value))
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _reused_entry(node: InputNode) -> dict[str, Any]:

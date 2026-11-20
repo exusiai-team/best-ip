@@ -143,6 +143,8 @@ _NODE_FIELDS = {
     "coffee",
     "pages",
     "alt_exit",
+    # classify 轻量档：主出口是 IPv4 时经代理的 IPv6 探测回显的地址（只有地址，不另查按 IP 资料）
+    "ipv6_exit_ip",
 }
 
 # 另一族出口（双栈节点）：只放按出口 IP 的那部分字段，节点身份与连接类检测留在主记录。
@@ -152,7 +154,7 @@ _ALT_EXIT_FIELDS = (
         "schema_version", "job_id", "node_index", "node", "type", "selected_proxy",
         "requested_proxy", "coffee_page_url", "phase", "transport_error", "attempt_count",
         "retry_count", "attempt_errors", "started_at", "finished_at", "gpt_check",
-        "elapsed_ms", "coffee", "pages", "alt_exit",
+        "elapsed_ms", "coffee", "pages", "alt_exit", "ipv6_exit_ip",
     }
 ) | {"ip_version"}
 _ALT_EXIT_REQUIRED_FIELDS = {
@@ -275,15 +277,31 @@ def validate_node(job_id: str, index: int, record: dict[str, Any]) -> None:
         validate_exit_ip(record.get("exit_ip"))
         if "alt_exit" in record:
             validate_alt_exit(record["alt_exit"], record["exit_ip"])
+        if "ipv6_exit_ip" in record:
+            validate_ipv6_exit_ip(record["ipv6_exit_ip"], record["exit_ip"])
     elif status == "failed":
         if record.get("exit_ip") is not None:
             raise ResultStoreError("失败节点不能保存伪造的出口 IP")
-        if "alt_exit" in record:
+        if "alt_exit" in record or "ipv6_exit_ip" in record:
             raise ResultStoreError("失败节点不能带另一族出口")
         if not str(record.get("error") or "").strip():
             raise ResultStoreError("失败节点缺少错误原因")
     else:
         raise ResultStoreError("节点记录状态无效")
+
+
+def validate_ipv6_exit_ip(value: Any, exit_ip: str) -> None:
+    """classify 轻量档的 IPv6 出口：合法的 IPv6 地址，且主出口是 IPv4（主出口是 IPv6 时不另记）。"""
+
+    try:
+        ok = (
+            ipaddress.ip_address(value).version == 6
+            and ipaddress.ip_address(exit_ip).version == 4
+        )
+    except (TypeError, ValueError):
+        ok = False
+    if not ok:
+        raise ResultStoreError("节点的 IPv6 出口无效")
 
 
 def validate_alt_exit(alt: Any, exit_ip: str) -> None:

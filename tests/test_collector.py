@@ -271,7 +271,9 @@ async def test_light_profile_skips_evidence_only_lookups_and_dual_stack(monkeypa
         job_id="job", node_index=0, node_name="node", node_type="ss",
         selected_proxy="node", mihomo_instance="m",
     )
-    assert probed == [] and "alt_exit" not in record
+    # 只发 IPv6 探测、只记 IPv6 出口地址，不为它另起一行、另查按 IP 资料
+    assert probed == [6] and "alt_exit" not in record
+    assert record["ipv6_exit_ip"] == V6_IP
     assert record["status"] == "success" and record["exit_ip"] == TRACE_IP
     # 只剩 lookup / IPure / IPQS 三个按 IP 查询；全球 Ping、端口、连通检测记为跳过。
     assert sorted(source for source, _, _ in upstream.calls) == ["coffee", "ipqs", "ipure"]
@@ -279,3 +281,16 @@ async def test_light_profile_skips_evidence_only_lookups_and_dual_stack(monkeypa
         assert record["requests"][name]["skipped"] is True
         assert record["requests"][name]["attempted"] is False
     assert record["error"] is None
+
+
+async def test_light_profile_without_ipv6_exit_records_nothing(monkeypatch):
+    _Upstream(monkeypatch, trace_ip=TRACE_IP, who_ip=TRACE_IP)
+    probed = _family_answers(monkeypatch, {4: TRACE_IP, 6: None})
+    collector = CoffeeCollector(
+        "http://127.0.0.1:7890", timeout_ms=5000, family_probe=FAMILY_PROBE, light=True
+    )
+    record = await collector.collect(
+        job_id="job", node_index=0, node_name="node", node_type="ss",
+        selected_proxy="node", mihomo_instance="m",
+    )
+    assert probed == [6] and "ipv6_exit_ip" not in record and "alt_exit" not in record
