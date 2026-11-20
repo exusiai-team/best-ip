@@ -1,6 +1,8 @@
 name: Scan subscription
 
-run-name: Best IP scan ${{ inputs.request_id }}
+# 网页发起的扫描标题是「Best IP scan <id>」（worker/scans.js、worker/latest.js 按它找运行）；
+# /api/v1/classify 发起的是「Best IP api <id>」，网页的「最近一次扫描」不会挑到它。
+run-name: Best IP ${{ inputs.channel == 'api' && 'api' || 'scan' }} ${{ inputs.request_id }}
 
 on:
   workflow_dispatch:
@@ -12,6 +14,16 @@ on:
       worker_url:
         description: Worker origin that holds the subscription for this request
         required: true
+        type: string
+      profile:
+        description: "full（完整扫描）或 classify（轻量档，见 backend/app/classify.py）"
+        required: false
+        default: full
+        type: string
+      channel:
+        description: "web（网页发起）或 api（/api/v1/classify 发起，结果交回 Worker）"
+        required: false
+        default: web
         type: string
 
 concurrency:
@@ -72,17 +84,24 @@ jobs:
         env:
           REQUEST_ID: ${{ inputs.request_id }}
           WORKER_URL: ${{ inputs.worker_url }}
+          PROFILE: ${{ inputs.profile }}
+          CHANNEL: ${{ inputs.channel }}
           IPURE_CONFIG_YAML: ${{ secrets.IPURE_CONFIG_YAML }}
         shell: bash
         run: |
           [[ "$REQUEST_ID" =~ ^[A-Za-z0-9_-]{1,128}$ ]]
           [[ "$WORKER_URL" =~ ^https://[A-Za-z0-9.-]+$ ]]
+          [[ "$PROFILE" =~ ^(full|classify)$ ]]
+          [[ "$CHANNEL" =~ ^(web|api)$ ]]
           test -n "$IPURE_CONFIG_YAML"
           umask 077
           mkdir -p config
           printf '%s\n' "$IPURE_CONFIG_YAML" > config/ipure.yml
+          # api 通道可能领到内联 YAML（写 subscription.yaml，不写 subscription-url）和 classify 上下文。
           node scripts/claim_subscription.mjs \
             --subscription-file "$RUNNER_TEMP/subscription-url" \
+            --yaml-file "$RUNNER_TEMP/subscription.yaml" \
+            --classify-file "$RUNNER_TEMP/classify-context.json" \
             --token-file "$RUNNER_TEMP/runner-token"
 
       - name: Set up uv
@@ -131,27 +150,62 @@ jobs:
           # 托管 runner 只有 2~4 核，默认公式 min(16, max(8, CPU)) 落在 8 并发；节点检测几乎全是等网络，
           # 同一条 25 节点订阅 8→16 并发的墙钟实测从 50.9s/70.9s 降到 30.4s/31.2s（见 backend/app/config.py）。
           BEST_IP_MAX_PARALLEL_NODES: "16"
+          # api 通道是 MyClash 合并后的订阅，可能上千个节点；网页扫描维持 500 的上限。
+          BEST_IP_MAX_NODES: ${{ inputs.channel == 'api' && '1000' || '500' }}
           BEST_IP_SUBSCRIPTION_RELAY_URL: ${{ inputs.worker_url }}/api/subscription-relay
           REQUEST_ID: ${{ inputs.request_id }}
+          PROFILE: ${{ inputs.profile }}
+          CHANNEL: ${{ inputs.channel }}
         shell: bash
-        run: >-
-          BEST_IP_SUBSCRIPTION_RELAY_TOKEN="$(cat "$RUNNER_TEMP/runner-token")"
-          .venv/bin/python scripts/run_scan.py
-          --request-id "$REQUEST_ID"
-          --subscription-file "$RUNNER_TEMP/subscription-url"
-          --output-dir "$RUNNER_TEMP/action-artifact"
+        run: |
+          args=(--request-id "$REQUEST_ID" --profile "$PROFILE"
+                --output-dir "$RUNNER_TEMP/action-artifact" --failure-file "$RUNNER_TEMP/scan-failure")
+          if [[ -f "$RUNNER_TEMP/subscription.yaml" ]]; then
+            args+=(--subscription-yaml-file "$RUNNER_TEMP/subscription.yaml")
+          else
+            args+=(--subscription-file "$RUNNER_TEMP/subscription-url")
+          fi
+          if [[ "$CHANNEL" == api ]]; then
+            args+=(--classify-output "$RUNNER_TEMP/classify.json")
+            if [[ -f "$RUNNER_TEMP/classify-context.json" ]]; then
+              args+=(--classify-context "$RUNNER_TEMP/classify-context.json")
+            fi
+          fi
+          BEST_IP_SUBSCRIPTION_RELAY_TOKEN="$(cat "$RUNNER_TEMP/runner-token")" \
+            .venv/bin/python scripts/run_scan.py "${args[@]}"
+
+      # api 通道：分类结果直接交回 Worker（存 8 天，见 worker/service.js），不靠 1 天就过期的 artifact。
+      - name: Publish classify result
+        if: inputs.channel == 'api'
+        env:
+          WORKER_URL: ${{ inputs.worker_url }}
+        shell: bash
+        run: node scripts/publish_classify.mjs --token-file "$RUNNER_TEMP/runner-token" --result "$RUNNER_TEMP/classify.json"
+
+      # api 通道失败时尽力告诉 Worker；没领到 runner 令牌就报不了，Worker 读状态时会从 GitHub 发现。
+      - name: Report classify failure
+        if: failure() && inputs.channel == 'api'
+        env:
+          WORKER_URL: ${{ inputs.worker_url }}
+        shell: bash
+        run: |
+          [[ -f "$RUNNER_TEMP/runner-token" ]] || exit 0
+          node scripts/publish_classify.mjs --token-file "$RUNNER_TEMP/runner-token" --failure-file "$RUNNER_TEMP/scan-failure"
 
       - name: Upload sanitized result artifact
+        if: success()
         uses: actions/upload-artifact@v7
         with:
           name: best-ip-result-${{ inputs.request_id }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/action-artifact
-          if-no-files-found: error
+          # api 通道全部复用时不起扫描，也就没有 artifact。
+          if-no-files-found: ${{ inputs.channel == 'api' && 'ignore' || 'error' }}
           retention-days: 1
 
       - name: Remove runner secrets and workspaces
         if: always()
         shell: bash
         run: |
-          rm -f "$RUNNER_TEMP/runner-token" "$RUNNER_TEMP/subscription-url" config/ipure.yml
+          rm -f "$RUNNER_TEMP/runner-token" "$RUNNER_TEMP/subscription-url" "$RUNNER_TEMP/subscription.yaml" \
+            "$RUNNER_TEMP/classify-context.json" "$RUNNER_TEMP/classify.json" config/ipure.yml
           rm -rf runtime/mihomo

@@ -259,3 +259,23 @@ async def test_nodes_sharing_an_exit_ip_ask_ip_lookups_once(monkeypatch):
     ]
     assert len(shared) == 6
     assert first["status"] == second["status"] == "success"
+
+
+async def test_light_profile_skips_evidence_only_lookups_and_dual_stack(monkeypatch):
+    upstream = _Upstream(monkeypatch, trace_ip=TRACE_IP, who_ip=TRACE_IP)
+    probed = _family_answers(monkeypatch, {4: TRACE_IP, 6: V6_IP})
+    collector = CoffeeCollector(
+        "http://127.0.0.1:7890", timeout_ms=5000, family_probe=FAMILY_PROBE, light=True
+    )
+    record = await collector.collect(
+        job_id="job", node_index=0, node_name="node", node_type="ss",
+        selected_proxy="node", mihomo_instance="m",
+    )
+    assert probed == [] and "alt_exit" not in record
+    assert record["status"] == "success" and record["exit_ip"] == TRACE_IP
+    # 只剩 lookup / IPure / IPQS 三个按 IP 查询；全球 Ping、端口、连通检测记为跳过。
+    assert sorted(source for source, _, _ in upstream.calls) == ["coffee", "ipqs", "ipure"]
+    for name in ("global_ping", "port_scan", "ping_check"):
+        assert record["requests"][name]["skipped"] is True
+        assert record["requests"][name]["attempted"] is False
+    assert record["error"] is None

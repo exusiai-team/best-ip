@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "uv run --no-dev python scripts/dev.py",
     "dev:no-reload": "uv run --no-dev python scripts/dev.py --no-reload",
-    "check": "node scripts/check_js.mjs && node scripts/check_frontend_contracts.mjs && node frontend-next/tools/mhtml-roundtrip.mjs",
+    "check": "node scripts/check_js.mjs && node scripts/check_service_api.mjs && node scripts/check_frontend_contracts.mjs && node frontend-next/tools/mhtml-roundtrip.mjs",
     "test": "npm run check",
     "deploy": "node scripts/deploy_guard.mjs && wrangler deploy",
     "dry-run": "wrangler deploy --dry-run"

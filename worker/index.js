@@ -3,6 +3,7 @@ import { fail, secureResponse } from "./responses.js";
 
 // Durable Object 类必须从 Worker 入口导出，wrangler.jsonc 的 SCAN_PROGRESS 绑定指向它。
 export { ScanProgress } from "./progress.js";
+export { ClassifyRegistry } from "./service.js";
 
 export default {
   async fetch(request, env, ctx) {

@@ -8,6 +8,7 @@ import { loginRoute, loginRedirect } from "./login.js";
 import { SUBSCRIPTION_RELAY_PATH, subscriptionRelay } from "./relay.js";
 import { SCAN_PROGRESS_PATH, scanProgressFeed, scanProgressReport } from "./progress.js";
 import { SCAN_CLAIM_PATH, claimSubscription } from "./runner.js";
+import { SERVICE_PREFIX, SCAN_RESULT_PATH, serviceApi, scanResultReport } from "./service.js";
 
 export async function api(request, env, auth) {
   const url = new URL(request.url);
@@ -51,6 +52,14 @@ export async function fetchHandler(request, env, ctx) {
   // 同上：runner 回报扫描进度（计数与逐节点阶段，不含出口 IP 与评分），凭同一张 runner 令牌。
   if (url.pathname === SCAN_PROGRESS_PATH) {
     return secureResponse(await scanProgressReport(request, env), { noStore: true });
+  }
+  // 同上：runner 交回 /api/v1/classify 的分类结果（或失败码），凭同一张 runner 令牌。
+  if (url.pathname === SCAN_RESULT_PATH) {
+    return secureResponse(await scanResultReport(request, env), { noStore: true });
+  }
+  // 机器接口：只认 Bearer 服务令牌（BESTIP_SERVICE_TOKEN），不走密码会话与同源检查。
+  if (url.pathname.startsWith(SERVICE_PREFIX)) {
+    return secureResponse(await serviceApi(request, env), { noStore: true });
   }
   const login = await loginRoute(request, env);
   if (login) return secureResponse(login, { noStore: true });

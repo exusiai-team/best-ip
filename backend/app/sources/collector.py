@@ -50,6 +50,9 @@ from .values import _clean_text
 
 # 双栈探测的上限：没有这一族出口的节点多半当场被拒，少数要等到连接超时。
 FAMILY_PROBE_TIMEOUT_SECONDS = 8.0
+# classify 轻量档不发的按 IP 请求：都只作证据，不进分数列，也不决定节点状态。
+LIGHT_SKIPPED_REQUESTS = ("global_ping", "port_scan", "ping_check")
+LIGHT_SKIPPED_MESSAGE = "classify 档不检测"
 
 
 class CoffeeCollector:
@@ -62,12 +65,16 @@ class CoffeeCollector:
         timeout_ms: int,
         ip_cache: IpCache | None = None,
         family_probe: dict[int, str] | None = None,
+        light: bool = False,
     ) -> None:
         self.transport = ProxyTransport(proxy_url, timeout_ms=timeout_ms)
         # 同一任务内各节点共用：同一出口 IP 的按 IP 查询只问一次（见 ip_cache.py）。
         self.ip_cache = ip_cache
         # who.1ms.dog 的 {4: IPv4 地址, 6: IPv6 地址}：逼节点按另一族出站，双栈节点多出一行。
-        self.family_probe = dict(family_probe or {})
+        # classify 轻量档不做双栈：分类只要一个落地 IP。
+        self.family_probe = {} if light else dict(family_probe or {})
+        # classify 轻量档：全球 Ping、端口扫描、连通检测只作证据、不影响分类，整组不发。
+        self.light = light
 
     async def collect(
         self,
@@ -138,9 +145,9 @@ class CoffeeCollector:
                 try:
                     alt = await self._alt_stage(client, exit_ip, family_tasks, ipx_task)
                     lookup, lookup_data = _checked_lookup(await stage.tasks["lookup"], exit_ip)
-                    global_ping = await stage.tasks["global_ping"]
-                    port_scan = await stage.tasks["port_scan"]
-                    ping_check = await stage.tasks["ping_check"]
+                    global_ping = await stage.result("global_ping")
+                    port_scan = await stage.result("port_scan")
+                    ping_check = await stage.result("ping_check")
                     gpt_requests = await gpt_task
                     ipure = await stage.tasks["ipure"]
                     ipqs = await stage.tasks["ipqs"]
@@ -359,6 +366,10 @@ class CoffeeCollector:
             ),
             "ipx": ipx_report(),
         }
+        if self.light:
+            for name in LIGHT_SKIPPED_REQUESTS:
+                coroutines.pop(name).close()
+
         def shared(name: str, coroutine: Coroutine[Any, Any, dict[str, Any]]) -> Any:
             if self.ip_cache is None or not SOURCE_BY_NAME[name].shareable:
                 return coroutine
@@ -391,6 +402,14 @@ class _IpStage:
     ip: str
     source: str
     tasks: dict[str, asyncio.Task[Any]]
+
+    async def result(self, name: str) -> dict[str, Any]:
+        """这一组里某个请求的结果；classify 轻量档没发的记为跳过。"""
+
+        task = self.tasks.get(name)
+        if task is None:
+            return _missing_result("", LIGHT_SKIPPED_MESSAGE, skipped=True)
+        return await task
 
     async def cancel(self) -> None:
         for task in self.tasks.values():

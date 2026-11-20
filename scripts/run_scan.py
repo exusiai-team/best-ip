@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import dataclasses
 import hashlib
+import json
 import math
 import os
 import re
 import shutil
 import sys
 import tempfile
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -30,6 +35,67 @@ ERRORS = {
 }
 
 
+INLINE_SUBSCRIPTION_URL = "https://inline.invalid/subscription"
+
+
+class _NothingToScan(Exception):
+    """classify 计划里一个要测的节点都没有（全部复用或跳过）：跳过扫描段。"""
+
+
+@dataclass
+class _ClassifyRun:
+    context: dict[str, Any]
+    started_at: str
+    plan: Any = None
+    records: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _iso_now() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _classify_plan(classify: _ClassifyRun, content: bytes, app_settings: Any) -> Any:
+    from backend.app.classify import ClassifyInputError, plan_scan
+
+    try:
+        return plan_scan(
+            content,
+            previous=classify.context.get("previous"),
+            reuse_hours=classify.context["reuse_hours"],
+            max_nodes=app_settings.max_nodes,
+        )
+    except ClassifyInputError as exc:
+        print(f"subscription_fetch_reason: {exc.reason}", file=sys.stderr)
+        raise ScanCLIError("input_invalid") from exc
+
+
+def _write_classify(args: argparse.Namespace, classify: _ClassifyRun) -> None:
+    from backend.app.classify import build_result, dumps
+
+    try:
+        payload = build_result(
+            classify.plan,
+            classify.records,
+            scan_id=args.request_id,
+            label=classify.context["label"],
+            profile=args.profile,
+            started_at=classify.started_at,
+            finished_at=_iso_now(),
+        )
+        output = args.classify_output
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("xb") as target:
+            target.write(dumps(payload))
+    except (OSError, ValueError) as exc:
+        raise ScanCLIError("output_failed") from exc
+    counts = payload["counts"]
+    print(
+        f"classify_result: nodes={payload['node_count']} ok={counts['ok']} "
+        f"failed={counts['failed']} skipped={counts['skipped']} reused={counts['reused']}",
+        file=sys.stderr,
+    )
+
+
 class ScanCLIError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
@@ -45,12 +111,22 @@ class SafeArgumentParser(argparse.ArgumentParser):
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = SafeArgumentParser(description="Run the shared scan core without an HTTP server")
     parser.add_argument("--request-id", required=True)
-    parser.add_argument("--subscription-file", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--subscription-file", type=Path)
+    # /api/v1/classify 可以直接内联 YAML：runner 领到的是订阅内容本身，不是地址。
+    source.add_argument("--subscription-yaml-file", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--run-id", type=int)
     parser.add_argument("--run-attempt", type=int)
     parser.add_argument("--local-test", action="store_true")
     parser.add_argument("--timeout", type=float, default=1500)
+    parser.add_argument("--profile", choices=("full", "classify"), default="full")
+    # 给了就另写一份 MyClash 分类结果（backend/app/classify.py），
+    # 上下文来自领取订阅时的 classify 字段。
+    parser.add_argument("--classify-output", type=Path)
+    parser.add_argument("--classify-context", type=Path)
+    # 失败时把固定错误码写进这个文件，workflow 据此回报 Worker。
+    parser.add_argument("--failure-file", type=Path)
     return parser.parse_args(argv)
 
 
@@ -59,6 +135,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", args.request_id)
         or not math.isfinite(args.timeout)
         or args.timeout <= 0
+        or (args.classify_context is not None and args.classify_output is None)
     ):
         raise ScanCLIError("input_invalid")
     if args.local_test and os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
@@ -101,6 +178,38 @@ def _read_subscription_url(path: Path) -> str:
         return url
     except (OSError, UnicodeError, ValueError) as exc:
         raise ScanCLIError("input_invalid") from exc
+
+
+def _read_subscription_yaml(path: Path, max_bytes: int) -> bytes:
+    try:
+        with path.open("rb") as source:
+            content = source.read(max_bytes + 1)
+    except OSError as exc:
+        raise ScanCLIError("input_invalid") from exc
+    if not content or len(content) > max_bytes:
+        raise ScanCLIError("input_invalid")
+    return content
+
+
+def _read_classify_context(path: Path | None) -> dict[str, Any]:
+    """领取订阅时 Worker 给的 classify 字段：label、reuse_hours 与上一次的结果（可空）。"""
+
+    if path is None:
+        return {"label": "", "reuse_hours": 0, "previous": None}
+    try:
+        context = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ScanCLIError("input_invalid") from exc
+    reuse_hours = context.get("reuse_hours") if isinstance(context, dict) else None
+    if (
+        not isinstance(context, dict)
+        or not isinstance(context.get("label"), str)
+        or isinstance(reuse_hours, bool)
+        or not isinstance(reuse_hours, (int, float))
+        or not 0 <= reuse_hours <= 168
+    ):
+        raise ScanCLIError("input_invalid")
+    return context
 
 
 def _remove_owned(path: Path) -> None:
@@ -210,9 +319,13 @@ async def run(
     reporter_factory: Any = None,
 ) -> None:
     _validate_args(args)
-    url = _read_subscription_url(args.subscription_file)
+    url = _read_subscription_url(args.subscription_file) if args.subscription_file else None
     output = args.output_dir.absolute()
     if output.exists() or output.is_symlink():
+        raise ScanCLIError("output_failed")
+    if args.classify_output is not None and (
+        args.classify_output.exists() or args.classify_output.is_symlink()
+    ):
         raise ScanCLIError("output_failed")
     try:
         from backend.app.config import settings
@@ -220,7 +333,7 @@ async def run(
         from backend.app.subscription import SubscriptionRelay, download_subscription
     except Exception as exc:
         raise ScanCLIError("environment_not_ready") from exc
-    app_settings = app_settings or settings
+    app_settings = dataclasses.replace(app_settings or settings, scan_profile=args.profile)
     manager_factory = manager_factory or ScanJobManager
     download = download or download_subscription
     try:
@@ -247,7 +360,7 @@ async def run(
 
 async def _run_scan(
     args: argparse.Namespace,
-    url: str,
+    url: str | None,
     output: Path,
     app_settings: Any,
     manager_factory: Any,
@@ -276,6 +389,12 @@ async def _run_scan(
     owned = None
     manager = None
     job_id = None
+    result = status = None
+    classify = (
+        _ClassifyRun(_read_classify_context(args.classify_context), started_at=_iso_now())
+        if args.classify_output is not None
+        else None
+    )
     completed = False
     final_counts = None
     final_nodes = None
@@ -291,13 +410,21 @@ async def _run_scan(
         async with asyncio.timeout(args.timeout):
             download_started = perf_counter()
             try:
-                content = await download(
-                    url,
-                    max_bytes=app_settings.subscription_max_bytes,
-                    timeout_seconds=min(app_settings.subscription_timeout_seconds, args.timeout),
-                    relay=relay,
-                    source=source,
-                )
+                if url is None:
+                    content = _read_subscription_yaml(
+                        args.subscription_yaml_file, app_settings.subscription_max_bytes
+                    )
+                    source.value = "inline"
+                else:
+                    content = await download(
+                        url,
+                        max_bytes=app_settings.subscription_max_bytes,
+                        timeout_seconds=min(
+                            app_settings.subscription_timeout_seconds, args.timeout
+                        ),
+                        relay=relay,
+                        source=source,
+                    )
             except (SubscriptionError, ValueError) as exc:
                 # 失败时也得留下「先撞过直连」的痕迹：不然只看得到中继那次的码，
                 # 「两个出口都要看」就成了口头约定。此处不报 subscription_source——
@@ -313,7 +440,9 @@ async def _run_scan(
                 )
                 raise ScanCLIError("input_invalid") from exc
             # value 只由 download_subscription 写成 direct/relay；替身不回写时如实报 unknown。
-            egress = source.value if source.value in {"direct", "relay"} else "unknown"
+            egress = (
+                source.value if source.value in {"direct", "relay", "inline"} else "unknown"
+            )
             download_ms = round((perf_counter() - download_started) * 1000)
             print(f"subscription_source: {egress}", file=sys.stderr)
             if source.fallback_reason is not None:
@@ -324,16 +453,38 @@ async def _run_scan(
             if not isinstance(content, bytes) or len(content) > app_settings.subscription_max_bytes:
                 raise ScanCLIError("input_invalid")
             # 与产物同一份「不许出现」的值：实时进度里的节点名含有其中任何一个就换成「节点 N」。
-            forbidden = {url, *credential_values(content), *subscription_url_values(url)}
+            forbidden = {*credential_values(content)}
+            if url is not None:
+                forbidden |= {url, *subscription_url_values(url)}
             if relay is not None:
                 forbidden.add(relay.token)
+            # 内联 YAML 没有地址：扫描核心仍按「地址 → 快照」取内容，这里给一个不会出网的占位地址。
+            scan_url = url or INLINE_SUBSCRIPTION_URL
+            scan_content = content
+            if classify is not None:
+                classify.plan = _classify_plan(classify, content, app_settings)
+                print(
+                    f"classify_plan: nodes={len(classify.plan.nodes)} "
+                    f"scan={classify.plan.scan_count}",
+                    file=sys.stderr,
+                )
+                scan_content = classify.plan.scan_yaml
+                if scan_content is None:
+                    # 全部复用或跳过：不必起扫描，也就没有网站用的 artifact。
+                    completed = True
+                    raise _NothingToScan
 
             async def snapshot_loader(
                 requested_url: str, *, max_bytes: int, timeout_seconds: float
             ) -> bytes:
-                if requested_url != url or len(content) > max_bytes or timeout_seconds <= 0:
+                if (
+                    requested_url != scan_url
+                    or scan_content is None
+                    or len(scan_content) > max_bytes
+                    or timeout_seconds <= 0
+                ):
                     raise SubscriptionError("订阅快照无效")
-                return content
+                return scan_content
 
             owned = Path(tempfile.mkdtemp(prefix="best-ip-scan-")).resolve()
             manager = manager_factory(
@@ -343,8 +494,8 @@ async def _run_scan(
                 download=snapshot_loader,
             )
             manager.create(
-                url,
-                subscription_sha256=hashlib.sha256(content).hexdigest(),
+                scan_url,
+                subscription_sha256=hashlib.sha256(scan_content).hexdigest(),
                 request_id=args.request_id,
             )
             job_id = args.request_id
@@ -397,7 +548,11 @@ async def _run_scan(
             counts = exported["manifest"]["counts"]
             if counts["success"] + counts["partial"] < 1:
                 raise ScanCLIError("scan_unavailable")
+            if classify is not None:
+                classify.records = list(exported["results"])
             completed = True
+    except _NothingToScan:
+        pass
     except TimeoutError as exc:
         raise ScanCLIError("scan_timeout") from exc
     except MihomoNotReadyError as exc:
@@ -415,8 +570,11 @@ async def _run_scan(
             await _confirmed_shutdown(manager, job_id, not completed)
         if owned is not None:
             _remove_owned(owned)
-    _publish(output, result, status)
-    if reporter is not None:
+    if result is not None:
+        _publish(output, result, status)
+    if classify is not None:
+        _write_classify(args, classify)
+    if reporter is not None and final_counts is not None:
         await reporter.report("done", final_counts, final_nodes, final_rows)
 
 
@@ -522,7 +680,16 @@ def _timing_summary(
     return "scan_timing: " + " ".join(parts)
 
 
+def _write_failure(args: argparse.Namespace | None, code: str) -> None:
+    path = getattr(args, "failure_file", None)
+    if path is None:
+        return
+    with contextlib.suppress(OSError):
+        path.write_text(code, encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
+    args = None
     try:
         args = parse_args(argv)
         asyncio.run(run(args))
@@ -536,6 +703,7 @@ def main(argv: list[str] | None = None) -> int:
         print("scan_completed: 已确认清理并发布脱敏扫描产物")
         return 0
     print(f"{failure.code}: {failure}", file=sys.stderr)
+    _write_failure(args, failure.code)
     return failure.exit_code
 
 
