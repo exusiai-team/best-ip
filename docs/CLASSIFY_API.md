@@ -129,6 +129,7 @@ MyClash GitHub Action（每天）
   "checked_at": "2026-11-20T19:20:03Z",
   "reused": false,
   "exit_ip": "203.0.113.7",
+  "exit_ipv6": "2001:db8::7",
   "country_code": "JP",
   "reg_country_code": "US",
   "usage_type": "residential",
@@ -152,6 +153,7 @@ MyClash GitHub Action（每天）
 | `checked_at` | 这个节点实测完成的时间（UTC）。复用的节点保留原来的实测时间，所以复用不会无限续期 |
 | `reused` | 是否来自 `reuse_hours` 复用 |
 | `exit_ip` | 落地 IP。由 Coffee trace 确定，trace 不通时依次退回 ipx / 1ms who 的经代理回显 |
+| `exit_ipv6` | 经这个节点访问 IPv6 地址时的 IPv6 出口，也就是节点能不能把 IPv6 流量带出去。`exit_ip` 本身是 IPv6 时同它；否则是经代理连 1ms who 的 IPv6 地址回显的地址；连不上或没测（复用了加这个字段之前的结果）为 `null`。只记地址，不另查这个 IPv6 的网络身份 |
 | `country_code` | 落地地理国家，ISO 3166-1 alpha-2 大写。来源顺序：ipx → 1ms who → 1ms IPQS 共识 → IPure |
 | `reg_country_code` | IP 注册国家。来源顺序：ipx `native.regCountry` → 1ms IPQS `regCc` → IPure registry |
 | `usage_type` | `residential` / `mobile` / `business` / `hosting` / `education` / `government` / `null`。来源顺序：ipx → 1ms IPQS → IPure 中第一个给出值的。`mobile` 不并入 `residential` |
@@ -173,7 +175,7 @@ MyClash GitHub Action（每天）
 ## 4. `classify` 轻量档
 
 - 会做：落地 IP 探测、网络身份（ipx → 1ms IPQS → IPure → Coffee lookup）、原生判定、风险标记、GPT/OpenAI 可达性。
-- 不做：全球 Ping、端口扫描、连通检测、双栈第二出口。`related_domains` 本来就只取自 lookup，不另外请求。
+- 不做：全球 Ping、端口扫描、连通检测；双栈第二出口只探测 IPv6 能不能出去（记进 `exit_ipv6`），不为它另查网络身份。`related_domains` 本来就只取自 lookup，不另外请求。
 - 多个节点落地 IP 相同时，lookup、IPure、1ms IPQS 只查一次，结果共用（按出口 IP 缓存）。
 - 某个数据源返回 429 时，该源记为缺失，相应字段为 null，节点不会因此失败。IPure 遇到 429 时最多尝试 3 次（按 1、2 秒退避）。
 - 每个节点最多尝试 3 次（第一次失败后，余下两次并行），并发 16。生产实测（2026-11-20，44 个节点的正式测试订阅）：从提交到 `done` 共 63 秒，其中 runner 准备约 25 秒、扫描约 40 秒，结果为 35 ok / 6 failed / 3 skipped。用内联 YAML 加 `reuse_hours: 20` 再跑一次：35 个复用，只重测 6 个，37 秒完成。300 个节点按并发推算约 5 分钟；api 通道单次最多测 1000 个节点。

@@ -183,3 +183,13 @@ def test_artifact_detects_tampered_record(tmp_path, make_success):
     exported["results"][0]["exit_ip"] = "198.51.100.7"
     with pytest.raises(ResultStoreError):
         build_artifact(exported, JOB_ID, 42, 1, set())
+
+
+def test_light_ipv6_exit_ip_is_accepted_only_as_ipv6_beside_an_ipv4_exit(make_success):
+    record = make_success(0)
+    record["ipv6_exit_ip"] = "2001:db8::7"
+    validate_node(JOB_ID, 0, record)
+    for bad in ("203.0.113.9", "not-an-ip", None):
+        record["ipv6_exit_ip"] = bad
+        with pytest.raises(ResultStoreError, match="IPv6 出口无效"):
+            validate_node(JOB_ID, 0, record)

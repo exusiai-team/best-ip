@@ -135,6 +135,7 @@ def test_build_result_maps_records_back_to_input_order_and_names():
         "checked_at": "2026-10-24T00:00:01Z",
         "reused": False,
         "exit_ip": "203.0.113.7",
+        "exit_ipv6": None,
         "country_code": "JP",
         "reg_country_code": "US",
         "usage_type": "residential",
@@ -248,3 +249,14 @@ def test_everything_reused_needs_no_scan():
         plan, [], scan_id="s", label="l", profile="classify", started_at="a", finished_at="b"
     )
     assert result["nodes"][0]["exit_ip"] == "203.0.113.1" and result["nodes"][0]["reused"]
+
+
+def test_exit_ipv6_comes_from_ipv6_main_exit_light_probe_or_alt_exit():
+    from backend.app.classify import _exit_ipv6
+
+    assert _exit_ipv6({"exit_ip": "203.0.113.7"}) is None
+    assert _exit_ipv6({"exit_ip": "2001:db8::1"}) == "2001:db8::1"
+    assert _exit_ipv6({"exit_ip": "203.0.113.7", "ipv6_exit_ip": "2001:db8::2"}) == "2001:db8::2"
+    alt = {"exit_ip": "203.0.113.7", "alt_exit": {"exit_ip": "2001:db8::3"}}
+    assert _exit_ipv6(alt) == "2001:db8::3"
+    assert _exit_ipv6({"exit_ip": "203.0.113.7", "ipv6_exit_ip": "bad"}) is None

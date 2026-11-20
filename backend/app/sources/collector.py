@@ -71,8 +71,13 @@ class CoffeeCollector:
         # 同一任务内各节点共用：同一出口 IP 的按 IP 查询只问一次（见 ip_cache.py）。
         self.ip_cache = ip_cache
         # who.1ms.dog 的 {4: IPv4 地址, 6: IPv6 地址}：逼节点按另一族出站，双栈节点多出一行。
-        # classify 轻量档不做双栈：分类只要一个落地 IP。
-        self.family_probe = {} if light else dict(family_probe or {})
+        # classify 轻量档只发 IPv6 那个，回显到 IPv6 就只记地址（ipv6_exit_ip），
+        # 不为它另查一组按 IP 资料：MyClash 只要知道「经这个节点的 IPv6 流量出不出得去」。
+        self.family_probe = {
+            version: address
+            for version, address in (family_probe or {}).items()
+            if not light or version == 6
+        }
         # classify 轻量档：全球 Ping、端口扫描、连通检测只作证据、不影响分类，整组不发。
         self.light = light
 
@@ -138,12 +143,16 @@ class CoffeeCollector:
             trace = trace_task.result()
             gpt_requests: dict[str, dict[str, Any]] = {}
             alt_exit: dict[str, Any] | None = None
+            ipv6_exit_ip: str | None = None
             if stage is not None:
                 if on_exit_ip is not None:
                     on_exit_ip()
                 alt: tuple[_IpStage, dict[str, Any]] | None = None
                 try:
-                    alt = await self._alt_stage(client, exit_ip, family_tasks, ipx_task)
+                    if self.light:
+                        ipv6_exit_ip = await _light_ipv6_exit(exit_ip, family_tasks)
+                    else:
+                        alt = await self._alt_stage(client, exit_ip, family_tasks, ipx_task)
                     lookup, lookup_data = _checked_lookup(await stage.tasks["lookup"], exit_ip)
                     global_ping = await stage.result("global_ping")
                     port_scan = await stage.result("port_scan")
@@ -227,6 +236,8 @@ class CoffeeCollector:
             "related_domains": _related_domains(lookup_data),
             # 另一族的出口（双栈节点才有）：结构与本记录的按 IP 部分相同，页面画成第二行。
             **({"alt_exit": alt_exit} if alt_exit is not None else {}),
+            # classify 轻量档：主出口是 IPv4 时，经代理的 IPv6 探测回显的地址（没有就不写）
+            **({"ipv6_exit_ip": ipv6_exit_ip} if ipv6_exit_ip else {}),
             "elapsed_ms": round((perf_counter() - started) * 1000),
             "proxy_evidence": {
                 "transport": "workspace_mihomo_mixed_port",
@@ -507,6 +518,19 @@ def _alt_exit(ip: str, probe: dict[str, Any], results: dict[str, dict[str, Any]]
         "completeness": completeness,
         "requests": requests,
     }
+
+
+async def _light_ipv6_exit(exit_ip: str, family_tasks: dict[int, asyncio.Task[Any]]) -> str | None:
+    """classify 轻量档：主出口是 IPv4 时，看 IPv6 探测有没有回显 IPv6 出口。
+
+    主出口本身就是 IPv6 时不用另记（classify 结果直接看 exit_ip）。
+    """
+
+    task = family_tasks.get(6)
+    if task is None or ipaddress.ip_address(exit_ip).version != 4:
+        return None
+    ip = _echoed_ip(await task)
+    return ip if ip and ipaddress.ip_address(ip).version == 6 else None
 
 
 def _echoed_ip(result: dict[str, Any]) -> str:
