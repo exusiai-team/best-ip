@@ -122,7 +122,7 @@ def credential_values(content: bytes) -> set[str]:
         elif isinstance(value, list):
             for child in value:
                 visit(child, key)
-        elif key in _CREDENTIAL_KEYS:
+        elif key in _CREDENTIAL_KEYS and value is not None:
             text = str(value).strip()
             if text:
                 values.add(text)
@@ -136,9 +136,10 @@ def contains_forbidden_value(value: Any, forbidden_values: set[str]) -> bool:
         return any(contains_forbidden_value(child, forbidden_values) for child in value.values())
     if isinstance(value, list):
         return any(contains_forbidden_value(child, forbidden_values) for child in value)
-    if isinstance(value, bool) or value is None:
+    # 凭据只会以字符串形式泄露；数字字段（延迟、端口、ASN、计数）和短数字凭据相等纯属巧合。
+    if not isinstance(value, str):
         return False
-    text = str(value)
+    text = value
     return any(
         text == forbidden or (len(forbidden) >= 6 and forbidden in text)
         for forbidden in forbidden_values
