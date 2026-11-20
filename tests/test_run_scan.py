@@ -127,3 +127,127 @@ def test_timing_summary_reports_sources_without_ips():
     assert "direct_fallback[ipx=1]" in line
     assert "exit_ips=2 unique_exit_ips=1" in line
     assert "203.0.113" not in line
+
+
+def _classify_manager_factory(collected):
+    class RecordingCollector:
+        def __init__(self, proxy_url, *, timeout_ms, ip_cache=None, light=False):
+            self.light = light
+
+        async def collect(self, *, job_id, node_index, node_name, **_):
+            collected.append((node_name, self.light))
+            from .conftest import success_record
+
+            return success_record(node_index, job_id=job_id, name=node_name)
+
+    def manager_factory(app_settings, store, workspace, *, download):
+        runner = NodeRunner(
+            app_settings, mihomo_factory=FakeMihomo, collector_factory=RecordingCollector
+        )
+        return ScanJobManager(
+            app_settings,
+            store,
+            workspace,
+            node_runner=runner,
+            download=download,
+            resolve_interface=lambda configured: None,
+            resolve_family_probe=_no_family_probe,
+        )
+
+    return manager_factory
+
+
+async def test_cli_classify_inline_yaml_writes_result(tmp_path, capsys):
+    mihomo = tmp_path / "mihomo"
+    mihomo.write_bytes(b"")
+    settings = Settings(mihomo_path=mihomo, node_retry_backoff_ms=0, max_parallel_nodes=2)
+    yaml_file = tmp_path / "subscription.yaml"
+    yaml_file.write_bytes(SUBSCRIPTION.replace(b"name: gamma", b"name: alpha"))
+    context = tmp_path / "context.json"
+    context.write_text(
+        json.dumps({"label": "myclash:abcd1234", "reuse_hours": 0, "previous": None})
+    )
+    collected: list[tuple[str, bool]] = []
+    output = tmp_path / "artifact"
+    classify_output = tmp_path / "classify.json"
+    args = run_scan.parse_args(
+        [
+            "--request-id", "clf-20261120-abcdef012345",
+            "--subscription-yaml-file", str(yaml_file),
+            "--output-dir", str(output),
+            "--run-id", "7",
+            "--run-attempt", "1",
+            "--profile", "classify",
+            "--classify-output", str(classify_output),
+            "--classify-context", str(context),
+        ]
+    )
+    await run_scan.run(
+        args, app_settings=settings, manager_factory=_classify_manager_factory(collected)
+    )
+    # 重名节点在扫描里加后缀区分，轻量档传到了采集器。
+    assert sorted(collected) == [("alpha", True), ("alpha #2", True), ("beta", True)]
+    result = json.loads(classify_output.read_bytes())
+    assert result["scan_id"] == "clf-20261120-abcdef012345"
+    assert result["label"] == "myclash:abcd1234" and result["profile"] == "classify"
+    assert [node["name"] for node in result["nodes"]] == ["alpha", "beta", "alpha"]
+    assert [node["status"] for node in result["nodes"]] == ["ok", "ok", "ok"]
+    assert result["input_sha256"] == hashlib.sha256(yaml_file.read_bytes()).hexdigest()
+    assert (output / "result.json").is_file()
+    err = capsys.readouterr().err
+    assert "subscription_source: inline" in err and "classify_plan: nodes=3 scan=3" in err
+
+
+async def test_cli_classify_all_reused_skips_the_scan(tmp_path):
+    from backend.app.classify import fingerprint
+
+    settings = Settings(mihomo_path=tmp_path / "missing", node_retry_backoff_ms=0)
+    proxies = [
+        {"name": name, "type": "ss", "server": server, "port": 8388, "password": "pw"}
+        for name, server in (("alpha", "8.8.8.8"), ("beta", "8.8.4.4"), ("gamma", "1.1.1.1"))
+    ]
+    now = run_scan._iso_now()
+    previous = {"nodes": [
+        {"fingerprint": fingerprint(proxy), "status": "ok", "checked_at": now,
+         "exit_ip": "203.0.113.9"}
+        for proxy in proxies
+    ]}
+    yaml_file = tmp_path / "subscription.yaml"
+    yaml_file.write_bytes(SUBSCRIPTION)
+    context = tmp_path / "context.json"
+    context.write_text(json.dumps({"label": "l", "reuse_hours": 20, "previous": previous}))
+    output = tmp_path / "artifact"
+    classify_output = tmp_path / "classify.json"
+    args = run_scan.parse_args(
+        [
+            "--request-id", "clf-reuse",
+            "--subscription-yaml-file", str(yaml_file),
+            "--output-dir", str(output),
+            "--run-id", "7",
+            "--run-attempt", "1",
+            "--profile", "classify",
+            "--classify-output", str(classify_output),
+            "--classify-context", str(context),
+        ]
+    )
+
+    def no_manager(*_args, **_kwargs):
+        raise AssertionError("全部复用时不该起扫描")
+
+    await run_scan.run(args, app_settings=settings, manager_factory=no_manager)
+    result = json.loads(classify_output.read_bytes())
+    assert result["counts"] == {"ok": 3, "failed": 0, "skipped": 0, "reused": 3}
+    assert not output.exists()
+
+
+def test_failure_file_records_the_exit_code(tmp_path):
+    failure = tmp_path / "failure"
+    code = run_scan.main(
+        [
+            "--request-id", "bad id",
+            "--subscription-file", str(tmp_path / "missing"),
+            "--output-dir", str(tmp_path / "out"),
+            "--failure-file", str(failure),
+        ]
+    )
+    assert code == 2 and failure.read_text() == "input_invalid"

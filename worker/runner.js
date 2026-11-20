@@ -3,6 +3,7 @@ import { REQUEST_ID_PATTERN, isRecord } from "./config.js";
 import { base64UrlEncode } from "./auth.js";
 import { verifyRunnerIdentity } from "./oidc.js";
 import { constantTimeEqual } from "./relay.js";
+import { classifyContext } from "./service.js";
 
 // 订阅地址怎么到 runner 手里：页面把它交给 Worker，Worker 暂存进这次 request_id 的 Durable Object
 // （15 分钟过期），只把 request_id 和本站 origin 放进 workflow 输入——订阅地址从不进入 GitHub。
@@ -30,12 +31,16 @@ async function sha256Hex(value) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** 发起扫描时暂存订阅地址；同一个 request_id 已有一份时拒绝覆盖。 */
-export async function stashSubscription(env, requestId, url) {
+/**
+ * 发起扫描时暂存订阅；同一个 request_id 已有一份时拒绝覆盖。
+ * subscription 是订阅地址字符串，或 /api/v1/classify 给的 `{url | yaml, classify}`（worker/service.js）。
+ */
+export async function stashSubscription(env, requestId, subscription) {
+  const body = typeof subscription === "string" ? { url: subscription } : subscription;
   const response = await requireStub(env, requestId).fetch("https://scan-state/subscription", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
+    body: JSON.stringify(body),
   });
   if (response.status === 409) throw new HttpError(409, "request_id 已被使用", "request_id_conflict");
   if (!response.ok) throw new HttpError(502, "订阅地址没有暂存成功", "scan_state_unavailable");
@@ -69,8 +74,16 @@ export async function claimSubscription(request, env) {
     });
     if (response.status === 410) throw new HttpError(410, "订阅地址已被领取或已过期", "subscription_gone");
     const stored = response.ok ? await response.json().catch(() => null) : null;
-    if (typeof stored?.url !== "string") throw new HttpError(502, "订阅地址读取失败", "scan_state_unavailable");
-    return json({ subscription_url: stored.url, runner_token: token }, 200, { "Cache-Control": "no-store" });
+    if (typeof stored?.url !== "string" && typeof stored?.yaml !== "string") {
+      throw new HttpError(502, "订阅地址读取失败", "scan_state_unavailable");
+    }
+    // /api/v1/classify 的扫描另带 classify 上下文（label、复用时长、上一次结果），网页发起的扫描没有。
+    const classify = stored.classify ? await classifyContext(env, stored.classify) : null;
+    return json({
+      ...(typeof stored.url === "string" ? { subscription_url: stored.url } : { subscription_yaml: stored.yaml }),
+      runner_token: token,
+      ...(classify ? { classify } : {}),
+    }, 200, { "Cache-Control": "no-store" });
   } catch (error) {
     if (error instanceof HttpError) return json({ error: error.code }, error.status, { "Cache-Control": "no-store" });
     throw error;

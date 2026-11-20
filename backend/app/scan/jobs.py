@@ -390,7 +390,12 @@ class ScanJobManager:
 
                 self._ip_caches[job_id] = IpCache()
                 # 双栈探测用 who.1ms.dog 的 A / AAAA 地址；解析不到就整体跳过，节点只出一行。
-                self._family_probes[job_id] = await self.resolve_family_probe()
+                # classify 轻量档不做双栈，连地址也不解析。
+                self._family_probes[job_id] = (
+                    {}
+                    if self.settings.scan_profile == "classify"
+                    else await self.resolve_family_probe()
+                )
                 worker_count = min(self.node_parallelism, len(proxies))
                 failure_phase = "scan"
                 node_tasks = [asyncio.create_task(node_worker()) for _ in range(worker_count)]

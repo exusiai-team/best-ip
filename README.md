@@ -101,17 +101,18 @@ uv run pytest -q      # 扫描核心、结果校验、CLI 端到端、产物读�
 
 Worker 没有第三方运行时 npm 依赖；密码会话签名使用原生 Web Crypto。`package.json` 只保留模块声明、语法检查命令和 Wrangler 部署工具。
 
-Worker 使用 Static Assets 托管 `frontend-next/`；当前配置不使用 Cloudflare Pages 或 GitHub Pages。实时进度用一个 SQLite 后端的 Durable Object（`wrangler.jsonc` 的 `SCAN_PROGRESS` 绑定与 `v1` 迁移），首次发布时由迁移自动创建，Workers 免费计划可用，不需要在控制台事先建资源；绑定缺失时页面只是退回「只显示步骤」。
+Worker 使用 Static Assets 托管 `frontend-next/`；当前配置不使用 Cloudflare Pages 或 GitHub Pages。实时进度用一个 SQLite 后端的 Durable Object（`wrangler.jsonc` 的 `SCAN_PROGRESS` 绑定与 `v1` 迁移），分类接口的登记与结果用另一个（`CLASSIFY_REGISTRY` 绑定与 `v2` 迁移），首次发布时由迁移自动创建，Workers 免费计划可用，不需要在控制台事先建资源；绑定缺失时页面只是退回「只显示步骤」。
 
 ## 平台配置
 
-一共只有 3 项，全都是「换不掉的外部凭据」：
+一共 4 项，全都是「换不掉的外部凭据」：
 
 | 位置 | 名称 | 说明 |
 | --- | --- | --- |
 | Worker Secret | `SITE_PASSWORD` | 访问密码，至少 16 个字符（最多 1024），用密码管理器生成 |
 | Worker Secret | `GITHUB_TOKEN` | fine-grained PAT，只授权 `exusiai-team/best-ip` 的 `Actions: Read and write` |
 | Actions Secret | `IPURE_CONFIG_YAML` | 与本地 `config/ipure.yml` 相同的请求头覆盖内容，必须带 IPure 验证 cookie |
+| Worker Secret | `BESTIP_SERVICE_TOKEN` | `/api/v1/*` 机器接口的 Bearer 令牌，至少 32 个字符；不配时这组接口返回 503，网页不受影响 |
 
 1. 在 GitHub Settings → Developer settings → Fine-grained tokens 新建 token：Resource owner 选 `exusiai-team`（组织需允许 fine-grained token），Repository access 只选 `best-ip`，Repository permissions 只给 `Actions: Read and write`（`Metadata: Read` 自动带上）。到期前换新并更新 Worker Secret；仓库换了所有者要改 `worker/config.js` 的 `GITHUB_OWNER` 并重发 token。
 2. 在 Worker 的 Settings → Variables and Secrets 配好上表两项 Worker Secret。
@@ -131,6 +132,22 @@ Worker 使用 Static Assets 托管 `frontend-next/`；当前配置不使用 Clou
 登录接口为 `POST /login`，没有内置分布式尝试次数限制；如需限制在线猜测，可在 Cloudflare 为该路径配置限流规则。缺少登录配置时 Worker 返回 503；扫描配置在调用扫描功能时检查。scan token 有效期两小时，只存在页面内存并通过 `X-Best-IP-Scan-Token` 请求头发送，不进入 URL 或 localStorage。
 
 ## API
+
+### 分类接口（机器调用）
+
+`/api/v1/*` 给 MyClash 这类机器调用方：只认 `Authorization: Bearer <BESTIP_SERVICE_TOKEN>`，不走密码会话与同源检查。提交订阅（地址或内联 YAML，≤ 5 MB）后轮询状态，完成后直接取 JSON 结果（每节点的落地 IP、家宽 / 机房、原生、国家、风险、AI 可用性），结果存在 Worker 里保留 8 天，不经过 1 天就过期的 artifact。同一令牌同时只跑一个扫描，`request_id` 幂等，`reuse_hours` 复用指纹不变的近期结果。workflow 以 `channel=api` 运行，标题是 `Best IP api <scan_id>`，网页的「最近一次扫描」不会挑到它。完整契约与 MyClash 对接写法见 [docs/CLASSIFY_API.md](docs/CLASSIFY_API.md)。
+
+```http
+POST /api/v1/classify
+GET /api/v1/classify/{scan_id}
+GET /api/v1/classify/{scan_id}/result
+GET /api/v1/classify/latest?label={label}
+GET /api/v1/health
+```
+
+本地备选：`uv run python -m backend.app.classify --input sub.yaml --output result.json [--profile classify] [--reuse prev.json]`，输出格式相同。
+
+### 网页接口
 
 除登录、退出页面及登录样式外，所有生产请求都需要密码登录会话。浏览器页面导航未登录时跳转 `/login`，API 未登录时返回 401。创建扫描时签发 scan token，不要求预先持有 token；后续查询、下载和取消请求需要内存中的 scan token。状态变更（包括登录和退出）还需要同源 Origin/Fetch-Metadata。
 

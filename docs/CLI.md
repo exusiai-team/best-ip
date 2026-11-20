@@ -2,7 +2,7 @@
 
 Actions runs the shared `ScanJobManager` directly, without FastAPI or the real-scan
 acceptance script. The three dispatch inputs, run title, pinned Mihomo version,
-artifact name, one-day retention, and schema v1 remain unchanged.
+artifact name, one-day retention, and schema v1 remain unchanged for web scans.
 
 ```bash
 uv run python scripts/run_scan.py \
@@ -92,3 +92,29 @@ hop against the public-address rule.
 Failures print only fixed safe codes/messages, never raw exception text. Offline
 tests with synthetic fixtures prove structure and lifecycle, not public-network
 Mihomo execution or Worker→Actions end-to-end acceptance.
+
+## Classify channel (`/api/v1/classify`)
+
+`scan.yml` dispatched with `channel=api` adds these arguments (see
+[CLASSIFY_API.md](CLASSIFY_API.md) for the result format):
+
+```bash
+uv run python scripts/run_scan.py --request-id <scan_id> --profile classify   (--subscription-file <url-file> | --subscription-yaml-file <yaml-file>)   --output-dir <artifact-dir> --classify-output <classify.json>   [--classify-context <claim classify JSON>] [--failure-file <file>]
+```
+
+- `--subscription-yaml-file` takes the subscription content itself (inline YAML from the
+  API, ≤ `BEST_IP_SUBSCRIPTION_MAX_BYTES`); it prints `subscription_source: inline`.
+- `--profile classify` (also `BEST_IP_SCAN_PROFILE`) skips global ping, port scan,
+  pingcheck and the dual-stack second exit; records stay schema v1 (those requests are
+  recorded as skipped) and still pass the same validators.
+- With `--classify-output`, the input is first planned by `backend/app/classify.py`:
+  metadata items, non-proxy types and malformed entries are skipped, nodes reusable from
+  `--classify-context` (`{label, reuse_hours, previous}`) are not scanned, duplicate names
+  get a ` #N` suffix in the scan YAML only. The CLI prints `classify_plan: nodes=N scan=M`
+  and, after publishing, `classify_result: nodes=… ok=… failed=… skipped=… reused=…`. When
+  nothing needs scanning, no scan runs and no artifact is published.
+- `--failure-file` receives the fixed exit code token on failure; the workflow forwards
+  it to the Worker with `scripts/publish_classify.mjs`.
+
+Local equivalent: `uv run python -m backend.app.classify --input sub.yaml --output
+result.json [--profile classify] [--reuse prev.json] [--reuse-hours 20]`.

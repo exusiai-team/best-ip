@@ -212,6 +212,7 @@ class NodeRunner:
                 # 没有缓存时不传：替身采集器不必认识这个参数。
                 **({"ip_cache": ip_cache} if ip_cache is not None else {}),
                 **({"family_probe": family_probe} if family_probe else {}),
+                **({"light": True} if self.settings.scan_profile == "classify" else {}),
             )
             if on_stage:
                 on_stage("connect", number, None)

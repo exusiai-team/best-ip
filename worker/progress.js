@@ -44,6 +44,8 @@ const MAX_NODE_MS = 3_600_000;
 const RETENTION_MS = 6 * 60 * 60 * 1000;
 // 暂存的订阅地址只等 runner 来领这么久（workflow 排队通常几秒，长的也就一两分钟）。
 const SUBSCRIPTION_TTL_MS = 15 * 60 * 1000;
+// 内联 YAML 分片大小（字符）：SQLite 后端单值上限 2MB，留足余量。
+const YAML_CHUNK_CHARS = 512 * 1024;
 const READ_TIMEOUT_MS = 3_000;
 // 阶段只往前走：同一次运行里晚到的旧报告不能把「打包中」打回「扫描中」。
 const PHASES = ["subscription", "scanning", "packaging", "done"];
@@ -322,17 +324,40 @@ export class ScanProgress {
   async subscription(request) {
     const storage = this.state.storage;
     if (request.method === "DELETE") {
-      await storage.delete("subscription");
+      await this.dropSubscription();
       return new Response(null, { status: 204 });
     }
     if (request.method !== "PUT") return new Response(null, { status: 405 });
     const body = await request.json().catch(() => null);
-    if (typeof body?.url !== "string" || !body.url) return new Response(null, { status: 400 });
+    const url = typeof body?.url === "string" && body.url ? body.url : null;
+    const yaml = typeof body?.yaml === "string" && body.yaml ? body.yaml : null;
+    if (Boolean(url) === Boolean(yaml)) return new Response(null, { status: 400 });
     // 一个 request_id 只发起一次：已经暂存过（哪怕已被领走）就不再接受。
     if (await storage.get("created_at")) return new Response(null, { status: 409 });
-    await storage.put({ subscription: { url: body.url, expires_at: Date.now() + SUBSCRIPTION_TTL_MS } });
+    // 内联 YAML 最大 5 MB，超过单值上限，分片存；领取或过期时连同分片一起删。
+    const chunks = yaml ? Math.ceil(yaml.length / YAML_CHUNK_CHARS) : 0;
+    const writes = {
+      subscription: {
+        url,
+        yaml_chunks: chunks,
+        classify: isRecord(body.classify) ? body.classify : null,
+        expires_at: Date.now() + SUBSCRIPTION_TTL_MS,
+      },
+    };
+    for (let index = 0; index < chunks; index += 1) {
+      writes[`subscription_yaml:${index}`] = yaml.slice(index * YAML_CHUNK_CHARS, (index + 1) * YAML_CHUNK_CHARS);
+    }
+    await storage.put(writes);
     await this.arm();
     return new Response(null, { status: 204 });
+  }
+
+  async dropSubscription() {
+    const storage = this.state.storage;
+    const pending = await storage.get("subscription");
+    const keys = ["subscription"];
+    for (let index = 0; index < (pending?.yaml_chunks || 0); index += 1) keys.push(`subscription_yaml:${index}`);
+    await storage.delete(keys);
   }
 
   async claim(request) {
@@ -347,9 +372,15 @@ export class ScanProgress {
     if (!runId || !runAttempt || !/^[a-f0-9]{64}$/u.test(String(body?.token_sha256 || ""))) {
       return new Response(null, { status: 400 });
     }
-    await storage.delete("subscription");
+    let yaml = null;
+    if (pending.yaml_chunks) {
+      const keys = Array.from({ length: pending.yaml_chunks }, (_, index) => `subscription_yaml:${index}`);
+      const parts = await storage.get(keys);
+      yaml = keys.map((key) => parts.get(key) ?? "").join("");
+    }
+    await this.dropSubscription();
     await storage.put("runner", { run_id: runId, run_attempt: runAttempt, token_sha256: body.token_sha256 });
-    return Response.json({ url: pending.url });
+    return Response.json(yaml === null ? { url: pending.url, classify: pending.classify ?? null } : { yaml, classify: pending.classify ?? null });
   }
 
   /** 记下第一次写入的时间，并把 alarm 定在最近的一个期限（订阅地址过期 / 整体保留期满）。 */
@@ -375,7 +406,7 @@ export class ScanProgress {
       return;
     }
     const pending = await storage.get("subscription");
-    if (pending && pending.expires_at <= now) await storage.delete("subscription");
+    if (pending && pending.expires_at <= now) await this.dropSubscription();
     await storage.setAlarm(createdAt + RETENTION_MS);
   }
 }

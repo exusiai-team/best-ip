@@ -36,6 +36,8 @@ def validate_local_frontend_origin(value: str | None) -> str | None:
     return f"http://127.0.0.1:{port}"
 
 
+SCAN_PROFILES = frozenset({"full", "classify"})
+
 ROOT_DIR = Path(__file__).resolve().parents[2]
 RUNTIME_DIR = ROOT_DIR / "runtime"
 JOBS_DIR = RUNTIME_DIR / "jobs"
@@ -75,8 +77,14 @@ class Settings:
     subscription_timeout_seconds: float = float(
         os.getenv("BEST_IP_SUBSCRIPTION_TIMEOUT_SECONDS", "30")
     )
+    # full：现有完整扫描。classify：给 /api/v1/classify 的轻量档，不测全球 Ping、端口、连通检测，
+    # 也不做双栈第二出口；出口 IP、归属、接入、原生、各家分数与 GPT 探测照旧
+    # （见 backend/app/classify.py）。
+    scan_profile: str = os.getenv("BEST_IP_SCAN_PROFILE", "full").strip().lower() or "full"
 
     def __post_init__(self) -> None:
+        if self.scan_profile not in SCAN_PROFILES:
+            raise ValueError("scan_profile 只能是 full 或 classify")
         for name in (
             "subscription_max_bytes",
             "max_nodes",

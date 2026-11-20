@@ -192,7 +192,27 @@ two-hour token bound to request ID and dispatch time. Mutations are same-origin.
   treats every failure as non-fatal and prints `progress_reports: sent=N failed=M` once
   at the end.
 
-Run title is `Best IP scan {request_id}`. Identity checks bind title, workflow,
+- `/api/v1/*` (classify API for machine callers, contract in [CLASSIFY_API.md](CLASSIFY_API.md)):
+  outside the password session and without same-origin checks; requires
+  `Authorization: Bearer <BESTIP_SERVICE_TOKEN>` (≥ 32 chars, else 503
+  `service_not_configured`; mismatch 401 `unauthorized`). POST `/api/v1/classify` stores the
+  subscription (`{url}` or chunked `{yaml}` plus `classify:{owner,label,reuse_hours}`) in the
+  scan's `SCAN_PROGRESS` object exactly like POST `/api/scans`, registers the scan in the
+  `CLASSIFY_REGISTRY` Durable Object (one instance; keys `scan:`, `req:`, `active:`,
+  `result:`, `latest:`; daily purge after 8 days except each label's latest done result) and
+  dispatches with inputs `{request_id:<scan_id>,worker_url,profile,channel:"api"}`. The claim
+  then also returns `subscription_yaml` instead of `subscription_url` for inline input, and
+  `classify:{label,reuse_hours,previous}` (previous = that label's latest done result when
+  `reuse_hours>0`).
+- POST `/api/scan-result`: server-to-server, runner token like `/api/scan-progress`; body is the
+  classify result (`schema_version:1`, `scan_id` equal to the token's request ID, `node_count`
+  equal to `nodes.length`, each node `{index,status∈ok|failed|skipped,name:string|null}`) or
+  `{status:"failed",error:<code>}`. 204 on success, 400 invalid, 404 for a non-API scan, 409
+  when already finished. The registry overwrites `scan_id`/`label` and never accepts a failure
+  over a done result.
+
+Run title is `Best IP scan {request_id}` (web) or `Best IP api {request_id}` (`channel=api`;
+web lookups ignore it). Identity checks bind title, workflow,
 dispatch event, branch, creation window, run and attempt. Artifact name is
 `best-ip-result-{request_id}-{run_id}-{run_attempt}`, unique and not expired;
 upload retention is one day. Tests exercise actual Worker dispatch and lookup.
@@ -377,8 +397,8 @@ Validation boundaries:
 | Limits | `BEST_IP_SUBSCRIPTION_MAX_BYTES` 5242880; `BEST_IP_MAX_NODES` 500; `BEST_IP_MAX_PARALLEL_JOBS` 2; `BEST_IP_MAX_PARALLEL_NODES` min(16, max(8, CPU count)); `BEST_IP_MAX_NODE_ATTEMPTS` 3; `BEST_IP_NODE_RETRY_BACKOFF_MS` 500; `BEST_IP_PAGE_TIMEOUT_MS` 45000; `BEST_IP_SUBSCRIPTION_TIMEOUT_SECONDS` 30 |
 | Download | `BEST_IP_MIHOMO_TAG`, `BEST_IP_MIHOMO_ARCHIVE_SHA256` optional; default is the latest release verified against the GitHub asset digest (required under Actions); `GITHUB_TOKEN` authenticates the API call |
 | Local verifier | `BEST_IP_TEST_SUBSCRIPTION_URL`; `BEST_IP_API_BASE` http://127.0.0.1:8000; `BEST_IP_REAL_SCAN_TIMEOUT_SECONDS` 1800; `BEST_IP_REQUEST_ID`; `BEST_IP_ALLOW_PARTIAL` opt-in |
-| Worker | `GITHUB_TOKEN` (fine-grained PAT, Actions read/write on this repo only), `SITE_PASSWORD`; `ASSETS` and `SCAN_PROGRESS` bindings |
-| Actions | secret `IPURE_CONFIG_YAML`; inputs `request_id`, `worker_url`; OIDC via `permissions: id-token: write` (`ACTIONS_ID_TOKEN_REQUEST_URL`/`_TOKEN`); temporary (step-scoped) `REQUEST_ID`, `WORKER_URL`, `BEST_IP_SUBSCRIPTION_RELAY_URL`, `BEST_IP_SUBSCRIPTION_RELAY_TOKEN` (read from `$RUNNER_TEMP/runner-token`, masked); job-level `BEST_IP_PYTHON_DIR`; run identity from `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` |
+| Worker | `GITHUB_TOKEN` (fine-grained PAT, Actions read/write on this repo only), `SITE_PASSWORD`, `BESTIP_SERVICE_TOKEN` (classify API only); `ASSETS`, `SCAN_PROGRESS` and `CLASSIFY_REGISTRY` bindings |
+| Actions | secret `IPURE_CONFIG_YAML`; inputs `request_id`, `worker_url`, `profile` (full/classify), `channel` (web/api); OIDC via `permissions: id-token: write` (`ACTIONS_ID_TOKEN_REQUEST_URL`/`_TOKEN`); temporary (step-scoped) `REQUEST_ID`, `WORKER_URL`, `BEST_IP_SUBSCRIPTION_RELAY_URL`, `BEST_IP_SUBSCRIPTION_RELAY_TOKEN` (read from `$RUNNER_TEMP/runner-token`, masked); job-level `BEST_IP_PYTHON_DIR`; run identity from `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` |
 | Deployment (Workers Builds) | none configured; guard reads the injected `WORKERS_CI`, `WORKERS_CI_BRANCH` |
 
 ## Frontend transport boundary

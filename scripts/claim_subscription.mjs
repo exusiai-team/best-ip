@@ -11,9 +11,12 @@
 
 import fs from "node:fs";
 
-function argument(name) {
+function argument(name, { optional = false } = {}) {
   const index = process.argv.indexOf(name);
-  if (index < 0 || !process.argv[index + 1]) throw new Error(`缺少参数 ${name}`);
+  if (index < 0 || !process.argv[index + 1]) {
+    if (optional) return null;
+    throw new Error(`缺少参数 ${name}`);
+  }
   return process.argv[index + 1];
 }
 
@@ -65,17 +68,31 @@ try {
   if (!/^https:\/\/[A-Za-z0-9.-]+$/u.test(workerUrl)) throw new Error("worker_url 无效");
   if (!/^[A-Za-z0-9_-]{1,128}$/u.test(requestId)) throw new Error("request_id 无效");
 
+  // /api/v1/classify 的扫描可能内联 YAML（没有地址），并另带 classify 上下文（label、复用时长、上一次结果）。
+  const yamlFile = argument("--yaml-file", { optional: true });
+  const classifyFile = argument("--classify-file", { optional: true });
+
   const payload = await claim(workerUrl, requestId, await oidcToken(workerUrl));
   const url = payload?.subscription_url;
+  const yaml = payload?.subscription_yaml;
   const token = payload?.runner_token;
-  if (typeof url !== "string" || !/^https?:\/\//u.test(url) || url.length > 4096 || /[\s]/u.test(url)) {
-    throw new Error("Worker 返回的订阅地址无效");
-  }
   if (typeof token !== "string" || !/^[A-Za-z0-9_.-]{16,512}$/u.test(token)) throw new Error("Worker 返回的 runner 令牌无效");
-  process.stdout.write(`::add-mask::${url}\n::add-mask::${token}\n`);
-  fs.writeFileSync(subscriptionFile, `${url}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  process.stdout.write(`::add-mask::${token}\n`);
+  if (typeof yaml === "string") {
+    if (!yamlFile || !yaml || Buffer.byteLength(yaml, "utf8") > 5 * 1024 * 1024) throw new Error("Worker 返回的订阅内容无效");
+    fs.writeFileSync(yamlFile, yaml, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  } else {
+    if (typeof url !== "string" || !/^https?:\/\//u.test(url) || url.length > 4096 || /[\s]/u.test(url)) {
+      throw new Error("Worker 返回的订阅地址无效");
+    }
+    process.stdout.write(`::add-mask::${url}\n`);
+    fs.writeFileSync(subscriptionFile, `${url}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  }
   fs.writeFileSync(tokenFile, token, { encoding: "utf8", flag: "wx", mode: 0o600 });
-  console.log("subscription_claimed: 已领取订阅地址与 runner 令牌");
+  if (payload?.classify && classifyFile) {
+    fs.writeFileSync(classifyFile, JSON.stringify(payload.classify), { encoding: "utf8", flag: "wx", mode: 0o600 });
+  }
+  console.log(`subscription_claimed: 已领取订阅${typeof yaml === "string" ? "内容" : "地址"}与 runner 令牌`);
 } catch (error) {
   process.stderr.write(`${error?.message || "领取订阅失败"}\n`);
   process.exitCode = 1;

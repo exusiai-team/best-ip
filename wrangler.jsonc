@@ -12,10 +12,17 @@
   // 扫描进行中的实时进度（只有计数与阶段，见 worker/progress.js）。每个 request_id 一个实例，
   // 6 小时后自清。SQLite 后端的 Durable Object 在 Workers 免费计划可用，发布时由迁移自动创建，
   // 不需要事先在控制台建任何资源；绑定缺失时页面只是退回「只显示步骤名」。
+  // CLASSIFY_REGISTRY：/api/v1/classify 的扫描登记与结果（全站一个实例，结果留 8 天，见 worker/service.js）。
   "durable_objects": {
-    "bindings": [{ "name": "SCAN_PROGRESS", "class_name": "ScanProgress" }]
+    "bindings": [
+      { "name": "SCAN_PROGRESS", "class_name": "ScanProgress" },
+      { "name": "CLASSIFY_REGISTRY", "class_name": "ClassifyRegistry" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ScanProgress"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ScanProgress"] },
+    { "tag": "v2", "new_sqlite_classes": ["ClassifyRegistry"] }
+  ],
   // Workers Builds 给非生产分支跑 `wrangler preview`，新版 wrangler 要求有这个块。
   // 预览不继承顶层的绑定与密钥：预览站点只证明「能构建、能上传」，打开会提示 Worker 未配置。
   "previews": {}
